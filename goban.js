@@ -164,9 +164,8 @@ export function renderGoban(trees, container, opts = {}) {
 
     const svg = svgEl('svg', {
       viewBox: `0 0 ${totalW} ${totalH}`,
-      width: totalW,
-      height: totalH,
-      style: 'max-width:100%;height:auto;display:block',
+      width: '100%',
+      style: 'display:block',
     });
 
     // Board background
