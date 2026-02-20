@@ -233,22 +233,30 @@ export function renderGoban(trees, container, opts = {}) {
       }
     }
 
-    // Coordinate labels — only along real board edges, not interior crop boundaries
+    // Coordinate labels — prefer real board edges; fall back to top/left when
+    // neither side of an axis touches a real edge (e.g. interior crop).
     const lg      = opts.labelGap ?? 8;
     const colTopY = M - R - lg - 3;
     const colBotY = M + boardH + R + lg + 7;
     const rowLX   = M - R - lg;
     const rowRX   = M + boardW + R + lg;
 
+    const topIsEdge   = vR0 === 0,        botIsEdge   = vR1 === rows - 1;
+    const leftIsEdge  = vC0 === 0,        rightIsEdge = vC1 === cols - 1;
+    const showTop     = topIsEdge  || !botIsEdge;   // default to top
+    const showBot     = botIsEdge;
+    const showLeft    = leftIsEdge || !rightIsEdge; // default to left
+    const showRight   = rightIsEdge;
+
     for (let i = vC0; i <= vC1; i++) {
       const x = M + (i - vC0) * CELL;
       const label = COL_LETTERS[i] ?? '';
-      if (vR0 === 0) {
+      if (showTop) {
         const tTop = svgEl('text', { x, y: colTopY, 'text-anchor': 'middle', 'font-size': 10, fill: '#5a3a1a' });
         tTop.textContent = label;
         svg.appendChild(tTop);
       }
-      if (vR1 === rows - 1) {
+      if (showBot) {
         const tBot = svgEl('text', { x, y: colBotY, 'text-anchor': 'middle', 'font-size': 10, fill: '#5a3a1a' });
         tBot.textContent = label;
         svg.appendChild(tBot);
@@ -258,12 +266,12 @@ export function renderGoban(trees, container, opts = {}) {
     for (let i = vR0; i <= vR1; i++) {
       const y = M + (i - vR0) * CELL;
       const label = String(rows - i);
-      if (vC0 === 0) {
+      if (showLeft) {
         const tLeft = svgEl('text', { x: rowLX, y: y + 4, 'text-anchor': 'end', 'font-size': 10, fill: '#5a3a1a' });
         tLeft.textContent = label;
         svg.appendChild(tLeft);
       }
-      if (vC1 === cols - 1) {
+      if (showRight) {
         const tRight = svgEl('text', { x: rowRX, y: y + 4, 'text-anchor': 'start', 'font-size': 10, fill: '#5a3a1a' });
         tRight.textContent = label;
         svg.appendChild(tRight);
