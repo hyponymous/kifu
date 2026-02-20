@@ -97,6 +97,40 @@ export function replayMain(board, cols, rows, tree) {
   if (tree.variations?.[0]) replayMain(board, cols, rows, tree.variations[0]);
 }
 
+// Compute the visible viewport [vR0,vR1] × [vC0,vC1] for a replayed board.
+// Starts from the stone bounding box with 2-cell padding, then applies
+// heuristics to snap boundaries to real board edges:
+//   A — game metadata (PB/PW/RE/KM) → force full board
+//   B — no setup stones (AB/AW) → pure move sequence is a game → force full board
+//   C — per-edge proximity: snap each edge independently when the bounding box
+//       comes within K lines (corner hoshi + 1: 4 for ≥13, 3 for smaller boards)
+export function calculateViewport(board, cols, rows, rootProps, tree) {
+  let minR = rows, maxR = -1, minC = cols, maxC = -1;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (board[r * cols + c] !== 0) {
+        if (r < minR) minR = r;
+        if (r > maxR) maxR = r;
+        if (c < minC) minC = c;
+        if (c > maxC) maxC = c;
+      }
+    }
+  }
+  if (maxR < 0) { minR = 0; maxR = rows - 1; minC = 0; maxC = cols - 1; } // empty board
+
+  const Kc = cols >= 13 ? 4 : 3, Kr = rows >= 13 ? 4 : 3;
+  const hasGameMeta    = ['PB','PW','RE','KM'].some(p => rootProps[p]);
+  const hasSetupStones = tree.nodes.some(n => n.props.AB?.length || n.props.AW?.length);
+  const forceFullBoard = hasGameMeta || !hasSetupStones;
+
+  return {
+    vR0: forceFullBoard || minR <= Kr        ? 0        : Math.max(0,        minR - 2),
+    vR1: forceFullBoard || maxR >= rows-1-Kr ? rows - 1 : Math.min(rows - 1, maxR + 2),
+    vC0: forceFullBoard || minC <= Kc        ? 0        : Math.max(0,        minC - 2),
+    vC1: forceFullBoard || maxC >= cols-1-Kc ? cols - 1 : Math.min(cols - 1, maxC + 2),
+  };
+}
+
 export function renderGoban(trees, container, opts = {}) {
   const M  = opts.margin     ?? MARGIN;
   const jt = opts.jitter     ?? JITTER;
@@ -124,37 +158,7 @@ export function renderGoban(trees, container, opts = {}) {
     const board = new Int8Array(cols * rows);
     replayMain(board, cols, rows, tree);
 
-    // Auto-crop: find bounding box of stones, add 2-cell padding
-    let minR = rows, maxR = -1, minC = cols, maxC = -1;
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        if (board[r * cols + c] !== 0) {
-          if (r < minR) minR = r;
-          if (r > maxR) maxR = r;
-          if (c < minC) minC = c;
-          if (c > maxC) maxC = c;
-        }
-      }
-    }
-    if (maxR < 0) { minR = 0; maxR = rows - 1; minC = 0; maxC = cols - 1; } // empty board
-
-    // Heuristic: snap crop boundaries to real board edges when appropriate.
-    // A — metadata: PB/PW/DT/RE/KM signal a game record → always show full board.
-    // B — no setup stones: tsumego almost always use AB/AW; a pure move
-    //     sequence is almost certainly a game → always show full board.
-    // C — per-edge proximity: each edge independently snaps to the real board
-    //     boundary when the stone bounding box comes within K lines of it.
-    //     K = corner hoshi + 1, so a stone on or inside the hoshi line triggers
-    //     the snap. Hiding a nearby edge misleads about strategic context.
-    const Kc = cols >= 13 ? 4 : 3, Kr = rows >= 13 ? 4 : 3;
-    const hasGameMeta    = ['PB','PW','RE','KM'].some(p => rootProps[p]);
-    const hasSetupStones = tree.nodes.some(n => n.props.AB?.length || n.props.AW?.length);
-    const forceFullBoard = hasGameMeta || !hasSetupStones;
-
-    const vR0 = forceFullBoard || minR <= Kr          ? 0        : Math.max(0,        minR - 2);
-    const vR1 = forceFullBoard || maxR >= rows-1-Kr   ? rows - 1 : Math.min(rows - 1, maxR + 2);
-    const vC0 = forceFullBoard || minC <= Kc          ? 0        : Math.max(0,        minC - 2);
-    const vC1 = forceFullBoard || maxC >= cols-1-Kc   ? cols - 1 : Math.min(cols - 1, maxC + 2);
+    const { vR0, vR1, vC0, vC1 } = calculateViewport(board, cols, rows, rootProps, tree);
 
     const R      = CELL * ss;
     const boardW = (vC1 - vC0) * CELL;

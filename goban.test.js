@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parse } from './sgf-parser.js';
-import { replayMain } from './goban.js';
+import { replayMain, calculateViewport } from './goban.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -127,4 +127,79 @@ test('rectangular board: captures work across dimensions', () => {
   const b = runRect(5, 9, '(;AW[aa]AB[ba];B[ab])');
   assert.equal(at(b, 5, 'aa'), EMPTY); // captured
   assert.equal(at(b, 5, 'ab'), BLACK);
+});
+
+// ── calculateViewport ─────────────────────────────────────────────────────────
+
+function viewport(cols, rows, sgf) {
+  const tree = parse(sgf)[0];
+  const board = new Int8Array(cols * rows);
+  replayMain(board, cols, rows, tree);
+  const rootProps = tree.nodes[0].props;
+  return calculateViewport(board, cols, rows, rootProps, tree);
+}
+
+// Heuristic A: game metadata forces full board
+test('viewport: PB/PW forces full board', () => {
+  const { vR0, vR1, vC0, vC1 } = viewport(19, 19,
+    '(;GM[1]SZ[19]PB[Alice]PW[Bob]AB[jj])');
+  assert.equal(vR0, 0); assert.equal(vR1, 18);
+  assert.equal(vC0, 0); assert.equal(vC1, 18);
+});
+
+test('viewport: KM forces full board', () => {
+  const { vR0, vR1, vC0, vC1 } = viewport(19, 19,
+    '(;GM[1]SZ[19]KM[6.5]AB[jj])');
+  assert.equal(vR0, 0); assert.equal(vR1, 18);
+  assert.equal(vC0, 0); assert.equal(vC1, 18);
+});
+
+test('viewport: DT alone does not force full board', () => {
+  const { vR0, vC0 } = viewport(19, 19,
+    '(;GM[1]SZ[19]DT[2009-04-22]AB[jj])');
+  // jj is interior — should be cropped despite DT
+  assert.ok(vR0 > 0);
+  assert.ok(vC0 > 0);
+});
+
+// Heuristic B: no setup stones → game → full board
+test('viewport: pure move sequence forces full board', () => {
+  const { vR0, vR1, vC0, vC1 } = viewport(19, 19,
+    '(;GM[1]SZ[19];B[jj])');
+  assert.equal(vR0, 0); assert.equal(vR1, 18);
+  assert.equal(vC0, 0); assert.equal(vC1, 18);
+});
+
+// Heuristic C: per-edge snapping
+test('viewport: corner stone snaps near edges, crops far edges', () => {
+  // AB[dd] = col 3, row 3 — within K=4 of top and left, far from bottom and right
+  const { vR0, vR1, vC0, vC1 } = viewport(19, 19,
+    '(;GM[1]SZ[19]AB[dd])');
+  assert.equal(vR0, 0);        // snapped to top edge
+  assert.equal(vC0, 0);        // snapped to left edge
+  assert.ok(vR1 < 18);         // bottom cropped
+  assert.ok(vC1 < 18);         // right cropped
+});
+
+test('viewport: interior stone crops all four sides', () => {
+  const { vR0, vR1, vC0, vC1 } = viewport(19, 19,
+    '(;GM[1]SZ[19]AB[jj])');
+  assert.ok(vR0 > 0);
+  assert.ok(vR1 < 18);
+  assert.ok(vC0 > 0);
+  assert.ok(vC1 < 18);
+});
+
+test('viewport: stones near all four edges snap all sides', () => {
+  // pd=col15,row3 and dp=col3,row15 — each within K=4 of their near edges
+  const { vR0, vR1, vC0, vC1 } = viewport(19, 19,
+    '(;GM[1]SZ[19]AB[pd][dp])');
+  assert.equal(vR0, 0); assert.equal(vR1, 18);
+  assert.equal(vC0, 0); assert.equal(vC1, 18);
+});
+
+test('viewport: empty board shows full board', () => {
+  const { vR0, vR1, vC0, vC1 } = viewport(19, 19, '(;GM[1]SZ[19])');
+  assert.equal(vR0, 0); assert.equal(vR1, 18);
+  assert.equal(vC0, 0); assert.equal(vC1, 18);
 });
