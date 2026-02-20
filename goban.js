@@ -147,7 +147,7 @@ export function renderGoban(trees, container, opts = {}) {
     //     K = corner hoshi + 1, so a stone on or inside the hoshi line triggers
     //     the snap. Hiding a nearby edge misleads about strategic context.
     const Kc = cols >= 13 ? 4 : 3, Kr = rows >= 13 ? 4 : 3;
-    const hasGameMeta    = ['PB','PW','DT','RE','KM'].some(p => rootProps[p]);
+    const hasGameMeta    = ['PB','PW','RE','KM'].some(p => rootProps[p]);
     const hasSetupStones = tree.nodes.some(n => n.props.AB?.length || n.props.AW?.length);
     const forceFullBoard = hasGameMeta || !hasSetupStones;
 
