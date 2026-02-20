@@ -13,9 +13,8 @@
   </header>
 
   <main>
-
-    <!-- ── Encoder (no hash) ───────────────────────────────────────────── -->
-    <section id="encoder" hidden>
+    <details id="sgf-panel">
+      <summary>Edit SGF</summary>
       <div id="drop-zone">
         <textarea id="sgf-input" placeholder="Paste SGF here…" spellcheck="false" autocomplete="off"></textarea>
         <div class="drop-hint">or drop a file anywhere on this box</div>
@@ -24,184 +23,189 @@
           <input type="file" id="file-input" accept=".sgf">
         </label>
       </div>
+    </details>
 
-      <div id="encode-error" class="error" hidden></div>
+    <div id="actions" hidden>
+      <button id="download-btn">Download</button>
+    </div>
 
-      <div class="encode-actions">
-        <button id="encode-btn">Generate link</button>
-        <span id="encode-status" hidden>✓ Link generated</span>
-      </div>
+    <p id="status" hidden>Decoding&hellip;</p>
+    <div id="error" class="error" hidden></div>
 
-      <div id="result" hidden>
-        <label for="url-output">Shareable link</label>
-        <div class="url-row">
-          <input type="text" id="url-output" readonly>
-          <button id="copy-btn">Copy</button>
-        </div>
-        <div id="encoder-board"></div>
-      </div>
-    </section>
+    <div id="game-info" class="game-info" hidden></div>
 
-    <!-- ── Decoder (hash present) ──────────────────────────────────────── -->
-    <section id="decoder" hidden>
-      <p id="decode-status">Decoding&hellip;</p>
-      <div id="game-info" class="game-info" hidden></div>
-      <div id="decode-error" class="error" hidden></div>
-      <button id="download-btn" hidden>Download SGF</button>
-      <div id="decoder-board"></div>
-      <p><a href="." class="back-link">Share your own SGF &rarr;</a></p>
-    </section>
-
+    <div id="board"></div>
   </main>
 
   <script type="module">
-    import { encode }          from './encode.js';
+    import { encode }           from './encode.js';
     import { decode, download } from './decode.js';
-    import { parse }           from './sgf-parser.js';
-    import { renderGoban }     from './goban.js';
+    import { parse }            from './sgf-parser.js';
+    import { renderGoban }      from './goban.js';
 
-    if (location.hash.length > 1) {
-      show('decoder');
-      runDecoder();
-    } else {
-      show('encoder');
-      setupEncoder();
+    const board       = document.getElementById('board');
+    const gameInfo    = document.getElementById('game-info');
+    const statusEl    = document.getElementById('status');
+    const errorEl     = document.getElementById('error');
+    const actions     = document.getElementById('actions');
+    const downloadBtn = document.getElementById('download-btn');
+    const sgfPanel    = document.getElementById('sgf-panel');
+    const textarea    = document.getElementById('sgf-input');
+    const fileInput   = document.getElementById('file-input');
+    const dropZone    = document.getElementById('drop-zone');
+
+    let currentFilename = 'game.sgf';
+    let encodeTimer     = null;
+
+    // ── Init / routing ───────────────────────────────────────────────────────
+
+    async function init() {
+      board.innerHTML = '';
+      gameInfo.hidden = true;
+      actions.hidden  = true;
+      errorEl.hidden  = true;
+      statusEl.hidden = true;
+
+      if (location.hash.length > 1) {
+        sgfPanel.open   = false;
+        statusEl.hidden = false;
+        let sgf;
+        try {
+          sgf = await decode(location.hash.slice(1));
+        } catch (e) {
+          statusEl.hidden = true;
+          showError(e.message);
+          return;
+        }
+        statusEl.hidden = true;
+        textarea.value  = sgf;
+        render(sgf);
+      } else {
+        textarea.value = '';
+        sgfPanel.open  = true;
+        textarea.focus();
+      }
     }
 
-    // ── Decoder ─────────────────────────────────────────────────────────────
+    window.addEventListener('hashchange', init);
 
-    async function runDecoder() {
-      const status      = document.getElementById('decode-status');
-      const gameInfo    = document.getElementById('game-info');
-      const downloadBtn = document.getElementById('download-btn');
-      const errorEl     = document.getElementById('decode-error');
+    // ── Hash update (debounced) ───────────────────────────────────────────────
 
-      let sgf;
-      try {
-        sgf = await decode(location.hash.slice(1));
-      } catch (e) {
-        status.hidden = true;
-        showError(errorEl, e.message);
+    function scheduleHashUpdate(sgf) {
+      clearTimeout(encodeTimer);
+      if (!sgf) {
+        history.replaceState(null, '', location.pathname);
+        return;
+      }
+      encodeTimer = setTimeout(async () => {
+        try {
+          const fragment = await encode(sgf);
+          history.replaceState(null, '', '#' + fragment);
+        } catch {}
+      }, 400);
+    }
+
+    // ── Render ───────────────────────────────────────────────────────────────
+
+    function render(sgf) {
+      errorEl.hidden = true;
+      if (!sgf) {
+        board.innerHTML = '';
+        gameInfo.hidden = true;
+        actions.hidden  = true;
         return;
       }
 
-      // Pull optional metadata from the first node of the first tree
-      const trees = parse(sgf);
+      let trees;
+      try {
+        trees = parse(sgf);
+      } catch (e) {
+        board.innerHTML = '';
+        gameInfo.hidden = true;
+        actions.hidden  = true;
+        showError(e.message);
+        return;
+      }
+
       const props = trees[0].nodes[0].props;
+
       const lines = [
         props.GN?.[0],
         props.PB?.[0] && props.PW?.[0] && `${props.PB[0]} vs ${props.PW[0]}`,
         props.DT?.[0],
       ].filter(Boolean);
 
-      status.hidden = true;
-
       if (lines.length) {
         gameInfo.innerHTML = lines.map(s => `<p>${esc(s)}</p>`).join('');
         gameInfo.hidden = false;
+      } else {
+        gameInfo.hidden = true;
       }
 
-      const rawName = props.GN?.[0] ?? 'game';
-      const filename = rawName.replace(/[/\\:*?"<>|]/g, '_').trim() + '.sgf';
+      const rawName   = props.GN?.[0] ?? 'game';
+      currentFilename = rawName.replace(/[/\\:*?"<>|]/g, '_').trim() + '.sgf';
+      downloadBtn.textContent = `Download ${currentFilename}`;
 
-      downloadBtn.textContent = `Download ${filename}`;
-      downloadBtn.hidden = false;
-      downloadBtn.addEventListener('click', () => download(sgf, filename));
-      renderGoban(trees, document.getElementById('decoder-board'));
+      renderGoban(trees, board);
+      actions.hidden = false;
     }
 
-    // ── Encoder ─────────────────────────────────────────────────────────────
+    // ── Textarea input ───────────────────────────────────────────────────────
 
-    function setupEncoder() {
-      const textarea  = document.getElementById('sgf-input');
-      const fileInput = document.getElementById('file-input');
-      const dropZone  = document.getElementById('drop-zone');
-      const encodeBtn = document.getElementById('encode-btn');
-      const result    = document.getElementById('result');
-      const urlOutput = document.getElementById('url-output');
-      const copyBtn   = document.getElementById('copy-btn');
-      const errorEl   = document.getElementById('encode-error');
+    textarea.addEventListener('input', () => {
+      const sgf = textarea.value.trim();
+      render(sgf);
+      scheduleHashUpdate(sgf);
+    });
 
-      let lastEncodedSgf = null;
-      const encodeStatus = document.getElementById('encode-status');
+    // ── Download ─────────────────────────────────────────────────────────────
 
-      textarea.addEventListener('input', () => {
-        if (textarea.value.trim() !== lastEncodedSgf) encodeStatus.hidden = true;
-        else encodeStatus.hidden = false;
-      });
+    downloadBtn.addEventListener('click', () => {
+      download(textarea.value.trim(), currentFilename);
+    });
 
-      async function doEncode() {
-        errorEl.hidden = true;
+    // ── File picker ───────────────────────────────────────────────────────────
+
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files[0]) readFile(fileInput.files[0]);
+    });
+
+    // ── Drag-and-drop ─────────────────────────────────────────────────────────
+
+    dropZone.addEventListener('dragover', e => {
+      e.preventDefault();
+      dropZone.classList.add('dragover');
+    });
+    ['dragleave', 'drop'].forEach(evt =>
+      dropZone.addEventListener(evt, () => dropZone.classList.remove('dragover'))
+    );
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault();
+      if (e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]);
+    });
+
+    function readFile(file) {
+      const reader = new FileReader();
+      reader.onload = e => {
+        textarea.value = e.target.result;
+        sgfPanel.open  = true;
         const sgf = textarea.value.trim();
-        if (!sgf) {
-          showError(errorEl, 'Paste an SGF or choose a file first.');
-          return;
-        }
-        try {
-          const fragment = await encode(sgf);
-          urlOutput.value = `${location.origin}${location.pathname}#${fragment}`;
-          result.hidden = false;
-          urlOutput.select();
-          lastEncodedSgf = sgf;
-          encodeStatus.hidden = false;
-          renderGoban(parse(sgf), document.getElementById('encoder-board'));
-        } catch (e) {
-          showError(errorEl, e.message);
-        }
-      }
-
-      // File picker
-      fileInput.addEventListener('change', () => {
-        if (fileInput.files[0]) readFile(fileInput.files[0]);
-      });
-
-      // Drag-and-drop
-      dropZone.addEventListener('dragover', e => {
-        e.preventDefault();
-        dropZone.classList.add('dragover');
-      });
-      ['dragleave', 'drop'].forEach(evt =>
-        dropZone.addEventListener(evt, () => dropZone.classList.remove('dragover'))
-      );
-      dropZone.addEventListener('drop', e => {
-        e.preventDefault();
-        if (e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]);
-      });
-
-      function readFile(file) {
-        const reader = new FileReader();
-        reader.onload = e => {
-          textarea.value = e.target.result;
-          doEncode(); // auto-generate link on file load
-        };
-        reader.readAsText(file);
-      }
-
-      encodeBtn.addEventListener('click', doEncode);
-
-      // Copy button
-      copyBtn.addEventListener('click', async () => {
-        try {
-          await navigator.clipboard.writeText(urlOutput.value);
-          copyBtn.textContent = 'Copied!';
-        } catch {
-          urlOutput.select();
-          document.execCommand('copy');
-          copyBtn.textContent = 'Copied!';
-        }
-        setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
-      });
+        render(sgf);
+        scheduleHashUpdate(sgf);
+      };
+      reader.readAsText(file);
     }
 
-    // ── Utilities ────────────────────────────────────────────────────────────
+    // ── Utilities ─────────────────────────────────────────────────────────────
 
-    function show(id) {
-      document.getElementById(id).hidden = false;
+    function showError(msg) {
+      errorEl.textContent = msg;
+      errorEl.hidden = false;
     }
 
-    function showError(el, msg) {
-      el.textContent = msg;
-      el.hidden = false;
+    function flash(btn, label, reset) {
+      btn.textContent = label;
+      setTimeout(() => { btn.textContent = reset; }, 2000);
     }
 
     function esc(str) {
@@ -210,6 +214,8 @@
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
     }
+
+    init();
   </script>
 </body>
 </html>
