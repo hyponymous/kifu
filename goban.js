@@ -59,7 +59,7 @@ function checkCaptures(board, size, r, c, opponent) {
   }
 }
 
-function replayMain(board, size, tree) {
+export function replayMain(board, size, tree) {
   for (const node of tree.nodes) {
     const { props } = node;
     for (const coord of (props.AB ?? [])) {
