@@ -142,7 +142,7 @@
         gameInfo.hidden = true;
       }
 
-      const rawName   = props.GN?.[0] ?? 'game';
+      const rawName   = props.GN?.[0]?.trim() || 'kifu';
       currentFilename = rawName.replace(/[/\\:*?"<>|]/g, '_').trim() + '.sgf';
       downloadBtn.textContent = `Download ${currentFilename}`;
 
