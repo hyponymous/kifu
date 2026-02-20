@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>kifu</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <a href="/" class="wordmark">kifu</a>
+    <p class="tagline">Share SGF files via URL &mdash; no server, no storage</p>
+  </header>
+
+  <main>
+
+    <!-- ── Encoder (no hash) ───────────────────────────────────────────── -->
+    <section id="encoder" hidden>
+      <div id="drop-zone">
+        <textarea id="sgf-input" placeholder="Paste SGF here…" spellcheck="false" autocomplete="off"></textarea>
+        <div class="drop-hint">or drop a file anywhere on this box</div>
+        <label class="file-label">
+          Choose file
+          <input type="file" id="file-input" accept=".sgf">
+        </label>
+      </div>
+
+      <div id="encode-error" class="error" hidden></div>
+
+      <button id="encode-btn">Generate link</button>
+
+      <div id="result" hidden>
+        <label for="url-output">Shareable link</label>
+        <div class="url-row">
+          <input type="text" id="url-output" readonly>
+          <button id="copy-btn">Copy</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Decoder (hash present) ──────────────────────────────────────── -->
+    <section id="decoder" hidden>
+      <p id="decode-status">Decoding&hellip;</p>
+      <div id="game-info" class="game-info" hidden></div>
+      <div id="decode-error" class="error" hidden></div>
+      <button id="download-btn" hidden>Download SGF</button>
+      <p><a href="/" class="back-link">Share your own SGF &rarr;</a></p>
+    </section>
+
+  </main>
+
+  <script type="module">
+    import { encode }          from './encode.js';
+    import { decode, download } from './decode.js';
+    import { parse }           from './sgf-parser.js';
+
+    if (location.hash.length > 1) {
+      show('decoder');
+      runDecoder();
+    } else {
+      show('encoder');
+      setupEncoder();
+    }
+
+    // ── Decoder ─────────────────────────────────────────────────────────────
+
+    async function runDecoder() {
+      const status      = document.getElementById('decode-status');
+      const gameInfo    = document.getElementById('game-info');
+      const downloadBtn = document.getElementById('download-btn');
+      const errorEl     = document.getElementById('decode-error');
+
+      let sgf;
+      try {
+        sgf = await decode(location.hash.slice(1));
+      } catch (e) {
+        status.hidden = true;
+        showError(errorEl, e.message);
+        return;
+      }
+
+      // Pull optional metadata from the first node of the first tree
+      const props = parse(sgf)[0].nodes[0].props;
+      const lines = [
+        props.GN?.[0],
+        props.PB?.[0] && props.PW?.[0] && `${props.PB[0]} vs ${props.PW[0]}`,
+        props.DT?.[0],
+      ].filter(Boolean);
+
+      status.hidden = true;
+
+      if (lines.length) {
+        gameInfo.innerHTML = lines.map(s => `<p>${esc(s)}</p>`).join('');
+        gameInfo.hidden = false;
+      }
+
+      const rawName = props.GN?.[0] ?? 'game';
+      const filename = rawName.replace(/[/\\:*?"<>|]/g, '_').trim() + '.sgf';
+
+      downloadBtn.textContent = `Download ${filename}`;
+      downloadBtn.hidden = false;
+      downloadBtn.addEventListener('click', () => download(sgf, filename));
+    }
+
+    // ── Encoder ─────────────────────────────────────────────────────────────
+
+    function setupEncoder() {
+      const textarea  = document.getElementById('sgf-input');
+      const fileInput = document.getElementById('file-input');
+      const dropZone  = document.getElementById('drop-zone');
+      const encodeBtn = document.getElementById('encode-btn');
+      const result    = document.getElementById('result');
+      const urlOutput = document.getElementById('url-output');
+      const copyBtn   = document.getElementById('copy-btn');
+      const errorEl   = document.getElementById('encode-error');
+
+      // File picker
+      fileInput.addEventListener('change', () => {
+        if (fileInput.files[0]) readFile(fileInput.files[0]);
+      });
+
+      // Drag-and-drop
+      dropZone.addEventListener('dragover', e => {
+        e.preventDefault();
+        dropZone.classList.add('dragover');
+      });
+      ['dragleave', 'drop'].forEach(evt =>
+        dropZone.addEventListener(evt, () => dropZone.classList.remove('dragover'))
+      );
+      dropZone.addEventListener('drop', e => {
+        e.preventDefault();
+        if (e.dataTransfer.files[0]) readFile(e.dataTransfer.files[0]);
+      });
+
+      function readFile(file) {
+        const reader = new FileReader();
+        reader.onload = e => { textarea.value = e.target.result; };
+        reader.readAsText(file);
+      }
+
+      // Generate link
+      encodeBtn.addEventListener('click', async () => {
+        errorEl.hidden = true;
+        result.hidden  = true;
+        const sgf = textarea.value.trim();
+        if (!sgf) {
+          showError(errorEl, 'Paste an SGF or choose a file first.');
+          return;
+        }
+        try {
+          const fragment = await encode(sgf);
+          urlOutput.value = `${location.origin}${location.pathname}#${fragment}`;
+          result.hidden = false;
+          urlOutput.select();
+        } catch (e) {
+          showError(errorEl, e.message);
+        }
+      });
+
+      // Copy button
+      copyBtn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(urlOutput.value);
+          copyBtn.textContent = 'Copied!';
+        } catch {
+          urlOutput.select();
+          document.execCommand('copy');
+          copyBtn.textContent = 'Copied!';
+        }
+        setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
+      });
+    }
+
+    // ── Utilities ────────────────────────────────────────────────────────────
+
+    function show(id) {
+      document.getElementById(id).hidden = false;
+    }
+
+    function showError(el, msg) {
+      el.textContent = msg;
+      el.hidden = false;
+    }
+
+    function esc(str) {
+      return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+  </script>
+</body>
+</html>

@@ -48,8 +48,8 @@ export function download(sgf, filename = 'game.sgf') {
 async function gunzip(data, maxBytes) {
   const stream = new DecompressionStream('gzip');
   const writer = stream.writable.getWriter();
-  await writer.write(data);
-  await writer.close();
+  // Swallow write/close errors: the stream may be cancelled (e.g. size limit exceeded)
+  writer.write(data).then(() => writer.close()).catch(() => {});
 
   const chunks = [];
   let totalLength = 0;

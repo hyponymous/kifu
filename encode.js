@@ -26,8 +26,9 @@ export async function encodeToHash(sgf) {
 async function gzip(data) {
   const stream = new CompressionStream('gzip');
   const writer = stream.writable.getWriter();
-  await writer.write(data);
-  await writer.close();
+  // Fire-and-forget write/close so the readable side can drain concurrently.
+  // Awaiting write() before a reader exists deadlocks once the internal buffer fills.
+  writer.write(data).then(() => writer.close());
   return new Uint8Array(await new Response(stream.readable).arrayBuffer());
 }
 
