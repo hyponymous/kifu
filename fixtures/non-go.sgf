@@ -1,0 +1,1 @@
+(;GM[2]FF[4]SZ[9]GN[Not a Go Game]C[GM value 2 means this is not a Go game. The renderer should silently skip it — no board should appear.])

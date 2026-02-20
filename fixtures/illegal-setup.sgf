@@ -1,0 +1,2 @@
+(;GM[1]FF[4]SZ[9]GN[Illegal Setup Position]C[Black stone at aa has zero liberties — completely surrounded by white via AB/AW setup, which does not trigger capture checking. The black stone should remain on the board despite being in an illegal position.]
+AB[aa]AW[ba][ab])

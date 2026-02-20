@@ -1,0 +1,4 @@
+(;GM[1]FF[4]SZ[9]GN[Variation Test]C[The main line plays at dd and fd; a variation plays at ff and ef instead. Only the main line should be rendered: black at ee+fd, white at dd.]
+;B[ee]
+(;W[dd];B[fd])
+(;W[ff];B[ef]))

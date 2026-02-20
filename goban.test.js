@@ -8,15 +8,22 @@ import { replayMain } from './goban.js';
 function runBoard(size, sgf) {
   const tree = parse(sgf)[0];
   const board = new Int8Array(size * size);
-  replayMain(board, size, tree);
+  replayMain(board, size, size, tree);
+  return board;
+}
+
+function runRect(cols, rows, sgf) {
+  const tree = parse(sgf)[0];
+  const board = new Int8Array(cols * rows);
+  replayMain(board, cols, rows, tree);
   return board;
 }
 
 // Read board value by SGF coordinate string (e.g. 'pd' → col=15, row=3)
-function at(board, size, coord) {
+function at(board, cols, coord) {
   const c = coord.charCodeAt(0) - 97;
   const r = coord.charCodeAt(1) - 97;
-  return board[r * size + c];
+  return board[r * cols + c];
 }
 
 const BLACK = 1, WHITE = -1, EMPTY = 0;
@@ -53,6 +60,14 @@ test('AE removes a stone', () => {
   assert.equal(at(b, 9, 'aa'), EMPTY);
 });
 
+test('setup stones in illegal position are not captured', () => {
+  // AB/AW place stones without triggering capture logic, so a group
+  // with zero liberties from setup remains on the board as-is.
+  // White completely surrounds black at aa (corner): ba and ab are white.
+  const b = runBoard(9, '(;AB[aa]AW[ba][ab])');
+  assert.equal(at(b, 9, 'aa'), BLACK); // zero liberties but not removed
+});
+
 // ── Captures ──────────────────────────────────────────────────────────────────
 
 test('single stone capture', () => {
@@ -84,4 +99,32 @@ test('main line follows variations[0] only', () => {
   const b = runBoard(9, '(;(;B[aa])(;B[bb]))');
   assert.equal(at(b, 9, 'aa'), BLACK);
   assert.equal(at(b, 9, 'bb'), EMPTY);
+});
+
+// ── Rectangular boards ────────────────────────────────────────────────────────
+
+test('rectangular board: stones placed within bounds', () => {
+  // 5 cols × 9 rows; ea = col 4 (rightmost valid), ia = col 8 (out of bounds)
+  const b = runRect(5, 9, '(;B[aa];W[ea])');
+  assert.equal(at(b, 5, 'aa'), BLACK);
+  assert.equal(at(b, 5, 'ea'), WHITE);
+});
+
+test('rectangular board: out-of-bounds column ignored', () => {
+  // fa = col 5, which exceeds the 5-col board
+  const b = runRect(5, 9, '(;B[fa])');
+  assert.ok(b.every(v => v === 0));
+});
+
+test('rectangular board: out-of-bounds row ignored', () => {
+  // aj = row 9, which exceeds the 9-row board
+  const b = runRect(5, 9, '(;B[aj])');
+  assert.ok(b.every(v => v === 0));
+});
+
+test('rectangular board: captures work across dimensions', () => {
+  // White at aa (top-left corner of 5×9), surrounded by black at ba and ab
+  const b = runRect(5, 9, '(;AW[aa]AB[ba];B[ab])');
+  assert.equal(at(b, 5, 'aa'), EMPTY); // captured
+  assert.equal(at(b, 5, 'ab'), BLACK);
 });

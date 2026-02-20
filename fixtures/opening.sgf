@@ -1,0 +1,2 @@
+(;GM[1]FF[4]SZ[19]GN[Opening Position]PB[Black]PW[White]DT[2026-02-20]C[A standard opening with stones spread across the board. The extreme stones reach rows 1 and 16 and columns 3 and 16, so the top, bottom, and right edges are real board edges (labels) while the left is one cell interior (ticks).]
+;B[pd];W[dp];B[pq];W[dd];B[qk];W[nc];B[qf];W[pb];B[qc];W[pc];B[od];W[nd];B[oe];W[qb];B[rc];W[rb];B[sc];W[ne];B[pf];W[kc])
