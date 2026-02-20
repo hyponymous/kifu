@@ -261,6 +261,12 @@ button {
   border-radius: 5px;
 }
 
+/* ── Board preview ───────────────────────────────────────────────────────── */
+
+#encoder-board, #decoder-board {
+  margin-top: 0.5rem;
+}
+
 /* ── Misc ────────────────────────────────────────────────────────────────── */
 
 .back-link {

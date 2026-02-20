@@ -38,6 +38,7 @@
           <input type="text" id="url-output" readonly>
           <button id="copy-btn">Copy</button>
         </div>
+        <div id="encoder-board"></div>
       </div>
     </section>
 
@@ -47,6 +48,7 @@
       <div id="game-info" class="game-info" hidden></div>
       <div id="decode-error" class="error" hidden></div>
       <button id="download-btn" hidden>Download SGF</button>
+      <div id="decoder-board"></div>
       <p><a href="/" class="back-link">Share your own SGF &rarr;</a></p>
     </section>
 
@@ -56,6 +58,7 @@
     import { encode }          from './encode.js';
     import { decode, download } from './decode.js';
     import { parse }           from './sgf-parser.js';
+    import { renderGoban }     from './goban.js';
 
     if (location.hash.length > 1) {
       show('decoder');
@@ -83,7 +86,8 @@
       }
 
       // Pull optional metadata from the first node of the first tree
-      const props = parse(sgf)[0].nodes[0].props;
+      const trees = parse(sgf);
+      const props = trees[0].nodes[0].props;
       const lines = [
         props.GN?.[0],
         props.PB?.[0] && props.PW?.[0] && `${props.PB[0]} vs ${props.PW[0]}`,
@@ -103,6 +107,7 @@
       downloadBtn.textContent = `Download ${filename}`;
       downloadBtn.hidden = false;
       downloadBtn.addEventListener('click', () => download(sgf, filename));
+      renderGoban(trees, document.getElementById('decoder-board'));
     }
 
     // ── Encoder ─────────────────────────────────────────────────────────────
@@ -139,6 +144,7 @@
           urlOutput.select();
           lastEncodedSgf = sgf;
           encodeStatus.hidden = false;
+          renderGoban(parse(sgf), document.getElementById('encoder-board'));
         } catch (e) {
           showError(errorEl, e.message);
         }
