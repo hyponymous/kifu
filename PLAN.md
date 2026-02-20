@@ -101,3 +101,20 @@ Or bundle it all — it's a small enough project to keep simple.
 - Support encoding multiple SGF files (as a collection)?
 - Rendering with a board viewer
 - Consider a short-link service integration for very long URLs
+
+## Rendering Backlog
+
+### SGF markup (on the displayed node)
+- [x] TR — triangle
+- [x] SQ — square
+- [x] CR — circle
+- [x] MA — X mark
+- [ ] LB — text labels (letters, numbers, arbitrary strings)
+- [ ] AR — arrows between two points
+- [ ] LN — lines between two points
+- [ ] TW / TB — territory marks (white/black area, e.g. final position)
+
+### UX / viewer features
+- [ ] Last-move indicator — small dot or ring on the most recently played stone
+- [ ] Ko ban indicator — mark the intersection forbidden by the ko rule
+- [ ] Move numbering — overlay sequence numbers on stones for the last N moves (or all moves)

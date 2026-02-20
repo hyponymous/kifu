@@ -314,6 +314,58 @@ export function renderGoban(trees, container, opts = {}) {
       }
     }
 
+    // Markup — drawn on top of stones, from the last displayed node
+    let dispTree = tree;
+    while (dispTree.variations?.[0]) dispTree = dispTree.variations[0];
+    const dispProps = dispTree.nodes[dispTree.nodes.length - 1]?.props ?? {};
+
+    const mw = 1.5; // mark stroke-width
+    for (const coord of (dispProps.TR ?? [])) {
+      const mc = sgfCoord(coord[0]), mr = sgfCoord(coord[1]);
+      if (mr < vR0 || mr > vR1 || mc < vC0 || mc > vC1) continue;
+      const cx = M + (mc - vC0) * CELL, cy = M + (mr - vR0) * CELL;
+      const v = board[mr * cols + mc];
+      const col = v === 1 ? '#f5f5f0' : '#1a1a1a';
+      const r = R * 0.52;
+      svg.appendChild(svgEl('polygon', {
+        points: `${cx},${cy - r} ${cx - r * 0.866},${cy + r * 0.5} ${cx + r * 0.866},${cy + r * 0.5}`,
+        fill: 'none', stroke: col, 'stroke-width': mw,
+      }));
+    }
+    for (const coord of (dispProps.SQ ?? [])) {
+      const mc = sgfCoord(coord[0]), mr = sgfCoord(coord[1]);
+      if (mr < vR0 || mr > vR1 || mc < vC0 || mc > vC1) continue;
+      const cx = M + (mc - vC0) * CELL, cy = M + (mr - vR0) * CELL;
+      const v = board[mr * cols + mc];
+      const col = v === 1 ? '#f5f5f0' : '#1a1a1a';
+      const hs = R * 0.42;
+      svg.appendChild(svgEl('rect', {
+        x: cx - hs, y: cy - hs, width: hs * 2, height: hs * 2,
+        fill: 'none', stroke: col, 'stroke-width': mw,
+      }));
+    }
+    for (const coord of (dispProps.CR ?? [])) {
+      const mc = sgfCoord(coord[0]), mr = sgfCoord(coord[1]);
+      if (mr < vR0 || mr > vR1 || mc < vC0 || mc > vC1) continue;
+      const cx = M + (mc - vC0) * CELL, cy = M + (mr - vR0) * CELL;
+      const v = board[mr * cols + mc];
+      const col = v === 1 ? '#f5f5f0' : '#1a1a1a';
+      svg.appendChild(svgEl('circle', {
+        cx, cy, r: R * 0.5, fill: 'none', stroke: col, 'stroke-width': mw,
+      }));
+    }
+    for (const coord of (dispProps.MA ?? [])) {
+      const mc = sgfCoord(coord[0]), mr = sgfCoord(coord[1]);
+      if (mr < vR0 || mr > vR1 || mc < vC0 || mc > vC1) continue;
+      const cx = M + (mc - vC0) * CELL, cy = M + (mr - vR0) * CELL;
+      const v = board[mr * cols + mc];
+      const col = v === 1 ? '#f5f5f0' : '#1a1a1a';
+      const d = R * 0.4;
+      const ls = { stroke: col, 'stroke-width': mw, 'stroke-linecap': 'round' };
+      svg.appendChild(svgEl('line', { x1: cx-d, y1: cy-d, x2: cx+d, y2: cy+d, ...ls }));
+      svg.appendChild(svgEl('line', { x1: cx+d, y1: cy-d, x2: cx-d, y2: cy+d, ...ls }));
+    }
+
     container.appendChild(svg);
   } catch {
     // silently skip on any error (malformed SGF edge cases)
