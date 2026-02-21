@@ -29,7 +29,24 @@
       </div>
     </details>
 
-    <div id="actions" hidden>
+    <div id="construct-entry">
+      <select id="construct-size">
+        <option value="19" selected>19&times;19</option>
+        <option value="13">13&times;13</option>
+        <option value="9">9&times;9</option>
+      </select>
+      <button id="construct-btn">Build position</button>
+    </div>
+
+    <div id="construct-toolbar" hidden>
+      <button id="color-black" class="color-btn active">&#9679; Black</button>
+      <button id="color-white" class="color-btn">&#9675; White</button>
+      <button id="construct-clear">Clear</button>
+      <button id="construct-close" aria-label="Close builder">&times;</button>
+    </div>
+
+    <div id="sharing" hidden>
+      <a id="share-link" href="" target="_blank" rel="noopener" class="share-link"></a>
       <button id="download-btn">Download</button>
     </div>
 
@@ -51,24 +68,32 @@
     const gameInfo    = document.getElementById('game-info');
     const statusEl    = document.getElementById('status');
     const errorEl     = document.getElementById('error');
-    const actions     = document.getElementById('actions');
+    const sharingEl   = document.getElementById('sharing');
+    const shareLinkEl = document.getElementById('share-link');
     const downloadBtn = document.getElementById('download-btn');
     const sgfPanel    = document.getElementById('sgf-panel');
     const textarea    = document.getElementById('sgf-input');
     const fileInput   = document.getElementById('file-input');
     const dropZone    = document.getElementById('drop-zone');
 
-    let currentFilename = 'game.sgf';
-    let encodeTimer     = null;
+    let currentFilename  = 'game.sgf';
+    let encodeTimer      = null;
+    let constructMode    = false;
+    let constructStones  = new Map(); // `${r},${c}` → 'B' | 'W'
+    let constructColor   = 'B';
+
+    const constructEntryEl   = document.getElementById('construct-entry');
+    const constructToolbarEl = document.getElementById('construct-toolbar');
+    const constructSizeEl    = document.getElementById('construct-size');
 
     // ── Init / routing ───────────────────────────────────────────────────────
 
     async function init() {
       board.innerHTML = '';
-      gameInfo.hidden = true;
-      actions.hidden  = true;
-      errorEl.hidden  = true;
-      statusEl.hidden = true;
+      gameInfo.hidden   = true;
+      sharingEl.hidden  = true;
+      errorEl.hidden    = true;
+      statusEl.hidden   = true;
 
       if (location.hash.length > 1) {
         sgfPanel.open   = false;
@@ -84,6 +109,8 @@
         statusEl.hidden = true;
         textarea.value  = sgf;
         render(sgf);
+        shareLinkEl.href = location.href;
+        shareLinkEl.textContent = location.href;
       } else {
         textarea.value = '';
         sgfPanel.open  = true;
@@ -99,24 +126,28 @@
       clearTimeout(encodeTimer);
       if (!sgf) {
         history.replaceState(null, '', location.pathname);
+        shareLinkEl.href = '';
+        shareLinkEl.textContent = '';
         return;
       }
       encodeTimer = setTimeout(async () => {
         try {
           const fragment = await encode(sgf);
           history.replaceState(null, '', '#' + fragment);
+          shareLinkEl.href = location.href;
+          shareLinkEl.textContent = location.href;
         } catch {}
       }, 400);
     }
 
     // ── Render ───────────────────────────────────────────────────────────────
 
-    function render(sgf) {
+    function render(sgf, gobanOpts = {}) {
       errorEl.hidden = true;
       if (!sgf) {
-        board.innerHTML = '';
-        gameInfo.hidden = true;
-        actions.hidden  = true;
+        board.innerHTML  = '';
+        gameInfo.hidden  = true;
+        sharingEl.hidden = true;
         return;
       }
 
@@ -124,9 +155,9 @@
       try {
         trees = parse(sgf);
       } catch (e) {
-        board.innerHTML = '';
-        gameInfo.hidden = true;
-        actions.hidden  = true;
+        board.innerHTML  = '';
+        gameInfo.hidden  = true;
+        sharingEl.hidden = true;
         showError(e.message);
         return;
       }
@@ -150,13 +181,14 @@
       currentFilename = rawName.replace(/[/\\:*?"<>|]/g, '_').trim() + '.sgf';
       downloadBtn.textContent = `Download ${currentFilename}`;
 
-      renderGoban(trees, board);
-      actions.hidden = false;
+      renderGoban(trees, board, gobanOpts);
+      sharingEl.hidden = false;
     }
 
     // ── Textarea input ───────────────────────────────────────────────────────
 
     textarea.addEventListener('input', () => {
+      if (constructMode) exitConstruct();
       const sgf = textarea.value.trim();
       render(sgf);
       scheduleHashUpdate(sgf);
@@ -218,6 +250,80 @@
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
     }
+
+    // ── Construct mode ────────────────────────────────────────────────────────
+
+    function generateConstructSGF(size) {
+      const ab = [], aw = [];
+      for (const [key, color] of constructStones) {
+        const [r, c] = key.split(',').map(Number);
+        const coord = String.fromCharCode(97 + c) + String.fromCharCode(97 + r);
+        (color === 'B' ? ab : aw).push(`[${coord}]`);
+      }
+      let p = `SZ[${size}]`;
+      if (ab.length) p += `AB${ab.join('')}`;
+      if (aw.length) p += `AW${aw.join('')}`;
+      return `(;${p})`;
+    }
+
+    function renderConstruct() {
+      const size = parseInt(constructSizeEl.value, 10);
+      const sgf = generateConstructSGF(size);
+      textarea.value = sgf;
+      render(sgf, { forceFullBoard: true, onClick: onBoardClick, jitter: 0 });
+      scheduleHashUpdate(sgf);
+    }
+
+    function onBoardClick(r, c) {
+      console.log('board click', r, c, 'color:', constructColor, 'was:', constructStones.get(`${r},${c}`));
+      const key = `${r},${c}`;
+      if (constructStones.get(key) === constructColor) {
+        constructStones.delete(key);
+      } else {
+        constructStones.set(key, constructColor);
+      }
+      renderConstruct();
+    }
+
+    function enterConstruct() {
+      constructMode = true;
+      constructEntryEl.hidden  = true;
+      constructToolbarEl.hidden = false;
+      sgfPanel.open = false;
+      renderConstruct();
+    }
+
+    function exitConstruct() {
+      constructMode = false;
+      constructEntryEl.hidden  = false;
+      constructToolbarEl.hidden = true;
+      render(textarea.value);
+    }
+
+    document.getElementById('construct-btn').addEventListener('click', enterConstruct);
+    document.getElementById('construct-close').addEventListener('click', exitConstruct);
+    document.getElementById('construct-clear').addEventListener('click', () => {
+      constructStones.clear();
+      renderConstruct();
+    });
+
+    const colorBtns = document.querySelectorAll('.color-btn');
+    document.getElementById('color-black').addEventListener('click', () => {
+      constructColor = 'B';
+      colorBtns.forEach(b => b.classList.remove('active'));
+      document.getElementById('color-black').classList.add('active');
+    });
+    document.getElementById('color-white').addEventListener('click', () => {
+      constructColor = 'W';
+      colorBtns.forEach(b => b.classList.remove('active'));
+      document.getElementById('color-white').classList.add('active');
+    });
+    constructSizeEl.addEventListener('change', () => {
+      if (constructMode) {
+        constructStones.clear();
+        renderConstruct();
+      }
+    });
 
     init();
   </script>

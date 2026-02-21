@@ -97,12 +97,24 @@ main {
   color: #666;
 }
 
-/* ── Actions row ─────────────────────────────────────────────────────────── */
+/* ── Sharing row ─────────────────────────────────────────────────────────── */
 
-#actions {
+#sharing {
   display: flex;
-  gap: 0.5rem;
+  align-items: center;
+  gap: 0.75rem;
   flex-wrap: wrap;
+}
+
+.share-link {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', monospace;
+  font-size: 0.78rem;
+  color: #1976d2;
 }
 
 /* ── Buttons ─────────────────────────────────────────────────────────────── */
@@ -227,6 +239,64 @@ button {
   border: 1px solid #e0e0e0;
   border-radius: 6px;
   font-size: 0.9rem;
+}
+
+/* ── Construct entry + toolbar ───────────────────────────────────────────── */
+
+#construct-entry,
+#construct-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+#construct-size {
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+  font-size: 0.875rem;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+  background: #f0f0ee;
+  cursor: pointer;
+}
+
+#construct-btn,
+#construct-clear,
+#construct-close {
+  padding: 0.4rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #444;
+  background: #f0f0ee;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+}
+
+#construct-btn:hover,
+#construct-clear:hover,
+#construct-close:hover {
+  background: #e4e4e2;
+}
+
+.color-btn {
+  padding: 0.4rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #444;
+  background: #f0f0ee;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+}
+
+.color-btn:hover {
+  background: #e4e4e2;
+}
+
+.color-btn.active {
+  background: #2e7d32;
+  color: #fff;
+  border-color: #2e7d32;
 }
 
 /* ── Errors ──────────────────────────────────────────────────────────────── */

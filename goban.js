@@ -158,7 +158,8 @@ export function renderGoban(trees, container, opts = {}) {
     const board = new Int8Array(cols * rows);
     replayMain(board, cols, rows, tree);
 
-    const { vR0, vR1, vC0, vC1 } = calculateViewport(board, cols, rows, rootProps, tree);
+    let { vR0, vR1, vC0, vC1 } = calculateViewport(board, cols, rows, rootProps, tree);
+    if (opts.forceFullBoard) { vR0 = 0; vR1 = rows - 1; vC0 = 0; vC1 = cols - 1; }
 
     const R      = CELL * ss;
     const boardW = (vC1 - vC0) * CELL;
@@ -364,6 +365,21 @@ export function renderGoban(trees, container, opts = {}) {
       const ls = { stroke: col, 'stroke-width': mw, 'stroke-linecap': 'round' };
       svg.appendChild(svgEl('line', { x1: cx-d, y1: cy-d, x2: cx+d, y2: cy+d, ...ls }));
       svg.appendChild(svgEl('line', { x1: cx+d, y1: cy-d, x2: cx-d, y2: cy+d, ...ls }));
+    }
+
+    if (opts.onClick) {
+      const g = svgEl('g', { style: 'cursor: crosshair' });
+      for (let r = vR0; r <= vR1; r++) {
+        for (let c = vC0; c <= vC1; c++) {
+          const rect = svgEl('rect', {
+            x: M + (c - vC0) * CELL - CELL / 2, y: M + (r - vR0) * CELL - CELL / 2,
+            width: CELL, height: CELL, fill: 'transparent', 'pointer-events': 'all',
+          });
+          rect.addEventListener('click', () => opts.onClick(r, c));
+          g.appendChild(rect);
+        }
+      }
+      svg.appendChild(g);
     }
 
     container.appendChild(svg);
