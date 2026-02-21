@@ -137,15 +137,14 @@
       } else {
         textarea.value = '';
         sgfPanel.open  = true;
-        textarea.focus();
       }
     }
 
-    window.addEventListener('hashchange', init);
+    window.addEventListener('popstate', init);
 
     // ── Hash update (debounced) ───────────────────────────────────────────────
 
-    function scheduleHashUpdate(sgf) {
+    function scheduleHashUpdate(sgf, push = false) {
       clearTimeout(encodeTimer);
       if (!sgf) {
         history.replaceState(null, '', location.pathname);
@@ -156,12 +155,24 @@
       encodeTimer = setTimeout(async () => {
         try {
           const fragment = await encode(sgf);
-          history.replaceState(null, '', '#' + fragment);
+          (push ? history.pushState : history.replaceState).call(history, null, '', '#' + fragment);
           shareLinkEl.href = location.href;
           shareLinkEl.textContent = location.href;
           if (!qrModal.hidden) renderQR();
         } catch {}
       }, 400);
+    }
+
+    async function commitHash() {
+      clearTimeout(encodeTimer);
+      const sgf = textarea.value.trim();
+      if (!sgf) return;
+      try {
+        const fragment = await encode(sgf);
+        history.pushState(null, '', '#' + fragment);
+        shareLinkEl.href = location.href;
+        shareLinkEl.textContent = location.href;
+      } catch {}
     }
 
     // ── Render ───────────────────────────────────────────────────────────────
@@ -212,16 +223,22 @@
 
     // ── Textarea input ───────────────────────────────────────────────────────
 
+    let isPaste = false;
+    textarea.addEventListener('paste', () => { isPaste = true; });
+
     textarea.addEventListener('input', () => {
       if (constructMode) exitConstruct();
       const sgf = textarea.value.trim();
+      const push = isPaste;
+      isPaste = false;
       render(sgf);
-      scheduleHashUpdate(sgf);
+      scheduleHashUpdate(sgf, push);
     });
 
     // ── Download ─────────────────────────────────────────────────────────────
 
-    downloadBtn.addEventListener('click', () => {
+    downloadBtn.addEventListener('click', async () => {
+      await commitHash();
       download(textarea.value.trim(), currentFilename);
     });
 
@@ -240,7 +257,8 @@
       }
     }
 
-    copyBtn.addEventListener('click', () => {
+    copyBtn.addEventListener('click', async () => {
+      await commitHash();
       const textEl = copyBtn.querySelector('span');
       navigator.clipboard.writeText(shareLinkEl.href).then(() => {
         textEl.textContent = 'Copied!';
@@ -248,7 +266,8 @@
       });
     });
 
-    qrBtn.addEventListener('click', () => {
+    qrBtn.addEventListener('click', async () => {
+      await commitHash();
       qrModal.hidden = false;
       renderQR();
     });
@@ -292,7 +311,7 @@
         sgfPanel.open  = true;
         const sgf = textarea.value.trim();
         render(sgf);
-        scheduleHashUpdate(sgf);
+        scheduleHashUpdate(sgf, true);
       };
       reader.readAsText(file);
     }
