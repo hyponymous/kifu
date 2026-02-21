@@ -34,6 +34,20 @@ function posJitter(r, c, axis) {
   return (s - Math.floor(s)) * 2 - 1;
 }
 
+// Expand an SGF point value, which may be a compressed rectangle "ul:lr".
+// Yields [r, c] pairs for all points in the rectangle (or the single point).
+function* expandCoords(val) {
+  if (val.length === 5 && val[2] === ':') {
+    const c1 = sgfCoord(val[0]), r1 = sgfCoord(val[1]);
+    const c2 = sgfCoord(val[3]), r2 = sgfCoord(val[4]);
+    for (let r = Math.min(r1, r2); r <= Math.max(r1, r2); r++)
+      for (let c = Math.min(c1, c2); c <= Math.max(c1, c2); c++)
+        yield [r, c];
+  } else if (val.length >= 2) {
+    yield [sgfCoord(val[1]), sgfCoord(val[0])];
+  }
+}
+
 function floodFill(board, cols, rows, r, c, color) {
   const visited = new Uint8Array(cols * rows);
   const queue = [[r, c]];
@@ -69,32 +83,34 @@ function checkCaptures(board, cols, rows, r, c, opponent) {
   }
 }
 
-export function replayMain(board, cols, rows, tree) {
+export function replayMain(board, cols, rows, tree, setupOnly = false) {
   for (const node of tree.nodes) {
     const { props } = node;
-    for (const coord of (props.AB ?? [])) {
-      const c = sgfCoord(coord[0]), r = sgfCoord(coord[1]);
-      if (r >= 0 && r < rows && c >= 0 && c < cols) board[r * cols + c] = 1;
+    for (const val of (props.AB ?? [])) {
+      for (const [r, c] of expandCoords(val))
+        if (r >= 0 && r < rows && c >= 0 && c < cols) board[r * cols + c] = 1;
     }
-    for (const coord of (props.AW ?? [])) {
-      const c = sgfCoord(coord[0]), r = sgfCoord(coord[1]);
-      if (r >= 0 && r < rows && c >= 0 && c < cols) board[r * cols + c] = -1;
+    for (const val of (props.AW ?? [])) {
+      for (const [r, c] of expandCoords(val))
+        if (r >= 0 && r < rows && c >= 0 && c < cols) board[r * cols + c] = -1;
     }
-    for (const coord of (props.AE ?? [])) {
-      const c = sgfCoord(coord[0]), r = sgfCoord(coord[1]);
-      if (r >= 0 && r < rows && c >= 0 && c < cols) board[r * cols + c] = 0;
+    for (const val of (props.AE ?? [])) {
+      for (const [r, c] of expandCoords(val))
+        if (r >= 0 && r < rows && c >= 0 && c < cols) board[r * cols + c] = 0;
     }
-    for (const [prop, color] of [['B', 1], ['W', -1]]) {
-      const val = props[prop]?.[0];
-      if (val === undefined) continue;
-      if (val === '' || val === 'tt') continue; // pass
-      const c = sgfCoord(val[0]), r = sgfCoord(val[1]);
-      if (r < 0 || r >= rows || c < 0 || c >= cols) continue;
-      board[r * cols + c] = color;
-      checkCaptures(board, cols, rows, r, c, -color);
+    if (!setupOnly) {
+      for (const [prop, color] of [['B', 1], ['W', -1]]) {
+        const val = props[prop]?.[0];
+        if (val === undefined) continue;
+        if (val === '' || val === 'tt') continue; // pass
+        const c = sgfCoord(val[0]), r = sgfCoord(val[1]);
+        if (r < 0 || r >= rows || c < 0 || c >= cols) continue;
+        board[r * cols + c] = color;
+        checkCaptures(board, cols, rows, r, c, -color);
+      }
     }
   }
-  if (tree.variations?.[0]) replayMain(board, cols, rows, tree.variations[0]);
+  if (!setupOnly && tree.variations?.[0]) replayMain(board, cols, rows, tree.variations[0], false);
 }
 
 // Compute the visible viewport [vR0,vR1] × [vC0,vC1] for a replayed board.
@@ -155,8 +171,10 @@ export function renderGoban(trees, container, opts = {}) {
     }
     if (cols < 1 || cols > 25 || rows < 1 || rows > 25) return;
 
+    const hasGameMeta  = ['PB','PW','RE','KM'].some(p => rootProps[p]);
+    const hasRootSetup = !!(rootProps.AB?.length || rootProps.AW?.length);
     const board = new Int8Array(cols * rows);
-    replayMain(board, cols, rows, tree);
+    replayMain(board, cols, rows, tree, !hasGameMeta && hasRootSetup);
 
     let { vR0, vR1, vC0, vC1 } = calculateViewport(board, cols, rows, rootProps, tree);
     if (opts.forceFullBoard) { vR0 = 0; vR1 = rows - 1; vC0 = 0; vC1 = cols - 1; }

@@ -203,3 +203,47 @@ test('viewport: empty board shows full board', () => {
   assert.equal(vR0, 0); assert.equal(vR1, 18);
   assert.equal(vC0, 0); assert.equal(vC1, 18);
 });
+
+// ── Compressed point lists (rectangle notation) ───────────────────────────────
+
+test('AB compressed rect places all stones in rectangle', () => {
+  // ao:bo = cols a-b, row o → ao and bo
+  const b = runBoard(19, '(;AB[ao:bo])');
+  assert.equal(at(b, 19, 'ao'), BLACK);
+  assert.equal(at(b, 19, 'bo'), BLACK);
+});
+
+test('AW compressed rect places column strip', () => {
+  // dp:ds = col d, rows p-s → dp, dq, dr, ds (4 stones)
+  const b = runBoard(19, '(;AW[dp:ds])');
+  assert.equal(at(b, 19, 'dp'), WHITE);
+  assert.equal(at(b, 19, 'dq'), WHITE);
+  assert.equal(at(b, 19, 'dr'), WHITE);
+  assert.equal(at(b, 19, 'ds'), WHITE);
+});
+
+test('AW compressed 2x2 rect places all four corners', () => {
+  // aa:bb = cols a-b, rows a-b → aa, ba, ab, bb
+  const b = runBoard(9, '(;AW[aa:bb])');
+  assert.equal(at(b, 9, 'aa'), WHITE);
+  assert.equal(at(b, 9, 'ba'), WHITE);
+  assert.equal(at(b, 9, 'ab'), WHITE);
+  assert.equal(at(b, 9, 'bb'), WHITE);
+});
+
+test('AE compressed rect clears stones', () => {
+  const b = runBoard(9, '(;AB[aa][ba][ab][bb];AE[aa:bb])');
+  assert.equal(at(b, 9, 'aa'), EMPTY);
+  assert.equal(at(b, 9, 'ba'), EMPTY);
+  assert.equal(at(b, 9, 'ab'), EMPTY);
+  assert.equal(at(b, 9, 'bb'), EMPTY);
+});
+
+test('SmartGo tsumego stone count: 4 black 8 white', () => {
+  // AB[ao:bo][bp][cr] AW[bl][bn:cn][co][dp:ds]
+  const b = runBoard(19, '(;AB[ao:bo][bp][cr]AW[bl][bn:cn][co][dp:ds])');
+  const blacks = Array.from(b).filter(v => v === BLACK).length;
+  const whites = Array.from(b).filter(v => v === WHITE).length;
+  assert.equal(blacks, 4);
+  assert.equal(whites, 8);
+});
