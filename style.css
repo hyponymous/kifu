@@ -251,16 +251,6 @@ button {
   flex-wrap: wrap;
 }
 
-#construct-size {
-  padding: 0.4rem 0.6rem;
-  font: inherit;
-  font-size: 0.875rem;
-  border: 1px solid #ccc;
-  border-radius: 5px;
-  background: #f0f0ee;
-  cursor: pointer;
-}
-
 #construct-btn,
 #construct-clear {
   padding: 0.4rem 1rem;

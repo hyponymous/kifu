@@ -30,11 +30,6 @@
     </details>
 
     <div id="construct-entry">
-      <select id="construct-size">
-        <option value="19" selected>19&times;19</option>
-        <option value="13">13&times;13</option>
-        <option value="9">9&times;9</option>
-      </select>
       <button id="construct-btn">Edit position</button>
     </div>
 
@@ -83,7 +78,7 @@
     import { encode }           from './encode.js';
     import { decode, download } from './decode.js';
     import { parse }            from './sgf-parser.js';
-    import { renderGoban }      from './goban.js';
+    import { renderGoban, replayMain } from './goban.js';
 
     const board       = document.getElementById('board');
     const gameInfo    = document.getElementById('game-info');
@@ -106,10 +101,11 @@
     let constructMode    = false;
     let constructStones  = new Map(); // `${r},${c}` → 'B' | 'W'
     let constructColor   = 'B';
+    let constructCols    = 19;
+    let constructRows    = 19;
 
     const constructEntryEl   = document.getElementById('construct-entry');
     const constructToolbarEl = document.getElementById('construct-toolbar');
-    const constructSizeEl    = document.getElementById('construct-size');
 
     // ── Init / routing ───────────────────────────────────────────────────────
 
@@ -322,29 +318,35 @@
 
     // ── Construct mode ────────────────────────────────────────────────────────
 
-    function generateConstructSGF(size) {
+    function treeHasMoves(tree) {
+      for (const node of tree.nodes) {
+        if (node.props.B !== undefined || node.props.W !== undefined) return true;
+      }
+      return tree.variations.some(v => treeHasMoves(v));
+    }
+
+    function generateConstructSGF() {
       const ab = [], aw = [];
       for (const [key, color] of constructStones) {
         const [r, c] = key.split(',').map(Number);
         const coord = String.fromCharCode(97 + c) + String.fromCharCode(97 + r);
         (color === 'B' ? ab : aw).push(`[${coord}]`);
       }
-      let p = `SZ[${size}]`;
+      const sz = constructCols === constructRows ? constructCols : `${constructCols}:${constructRows}`;
+      let p = `SZ[${sz}]`;
       if (ab.length) p += `AB${ab.join('')}`;
       if (aw.length) p += `AW${aw.join('')}`;
       return `(;${p})`;
     }
 
     function renderConstruct() {
-      const size = parseInt(constructSizeEl.value, 10);
-      const sgf = generateConstructSGF(size);
+      const sgf = generateConstructSGF();
       textarea.value = sgf;
       render(sgf, { forceFullBoard: true, onClick: onBoardClick, jitter: 0 });
       scheduleHashUpdate(sgf);
     }
 
     function onBoardClick(r, c) {
-      console.log('board click', r, c, 'color:', constructColor, 'was:', constructStones.get(`${r},${c}`));
       const key = `${r},${c}`;
       if (constructStones.get(key) === constructColor) {
         constructStones.delete(key);
@@ -355,8 +357,39 @@
     }
 
     function enterConstruct() {
+      const sgf = textarea.value.trim();
+      if (sgf) {
+        let trees;
+        try { trees = parse(sgf); } catch { return; }
+        const tree = trees[0];
+        const rootProps = tree.nodes[0]?.props ?? {};
+        const szProp = rootProps.SZ?.[0] ?? '19';
+        if (szProp.includes(':')) {
+          const parts = szProp.split(':');
+          constructCols = parseInt(parts[0], 10);
+          constructRows = parseInt(parts[1], 10);
+        } else {
+          constructCols = constructRows = parseInt(szProp, 10) || 19;
+        }
+        if (treeHasMoves(tree) && !confirm('This will remove all moves, keeping only the current board position. Continue?')) {
+          return;
+        }
+        const boardState = new Int8Array(constructCols * constructRows);
+        replayMain(boardState, constructCols, constructRows, tree);
+        constructStones.clear();
+        for (let r = 0; r < constructRows; r++) {
+          for (let c = 0; c < constructCols; c++) {
+            const v = boardState[r * constructCols + c];
+            if (v === 1) constructStones.set(`${r},${c}`, 'B');
+            else if (v === -1) constructStones.set(`${r},${c}`, 'W');
+          }
+        }
+      } else {
+        constructCols = constructRows = 19;
+        constructStones.clear();
+      }
       constructMode = true;
-      constructEntryEl.hidden  = true;
+      constructEntryEl.hidden   = true;
       constructToolbarEl.hidden = false;
       sgfPanel.open = false;
       renderConstruct();
@@ -364,7 +397,7 @@
 
     function exitConstruct() {
       constructMode = false;
-      constructEntryEl.hidden  = false;
+      constructEntryEl.hidden   = false;
       constructToolbarEl.hidden = true;
       render(textarea.value);
     }
@@ -386,12 +419,6 @@
       constructColor = 'W';
       colorBtns.forEach(b => b.classList.remove('active'));
       document.getElementById('color-white').classList.add('active');
-    });
-    constructSizeEl.addEventListener('change', () => {
-      if (constructMode) {
-        constructStones.clear();
-        renderConstruct();
-      }
     });
 
     init();
