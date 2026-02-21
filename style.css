@@ -262,8 +262,7 @@ button {
 }
 
 #construct-btn,
-#construct-clear,
-#construct-close {
+#construct-clear {
   padding: 0.4rem 1rem;
   font-size: 0.875rem;
   font-weight: 500;
@@ -274,9 +273,23 @@ button {
 }
 
 #construct-btn:hover,
-#construct-clear:hover,
-#construct-close:hover {
+#construct-clear:hover {
   background: #e4e4e2;
+}
+
+#construct-close {
+  padding: 0.4rem 0.5rem;
+  font-size: 0.875rem;
+  color: #888;
+  background: none;
+  border: none;
+  border-radius: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+#construct-close:hover {
+  color: #1a1a1a;
 }
 
 .color-btn {
@@ -297,6 +310,83 @@ button {
   background: #2e7d32;
   color: #fff;
   border-color: #2e7d32;
+}
+
+/* ── Copy / QR / Download buttons ────────────────────────────────────────── */
+
+#copy-btn,
+#qr-btn,
+#download-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+}
+
+#copy-btn,
+#qr-btn {
+  padding: 0.4rem 0.8rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #444;
+  background: #f0f0ee;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+}
+
+#copy-btn:hover,
+#qr-btn:hover {
+  background: #e4e4e2;
+  border-color: #bbb;
+}
+
+/* ── QR modal ────────────────────────────────────────────────────────────── */
+
+#qr-modal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 100;
+}
+
+#qr-modal-content {
+  position: relative;
+  background: #fff;
+  border-radius: 12px;
+  padding: 1.75rem;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.25);
+}
+
+#qr-display {
+  width: 200px;
+}
+
+#qr-display svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+#qr-close {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.4rem;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  color: #999;
+  border-radius: 50%;
+}
+
+#qr-close:hover {
+  background: #f0f0ee;
+  color: #1a1a1a;
 }
 
 /* ── Errors ──────────────────────────────────────────────────────────────── */

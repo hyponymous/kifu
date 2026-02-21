@@ -35,19 +35,30 @@
         <option value="13">13&times;13</option>
         <option value="9">9&times;9</option>
       </select>
-      <button id="construct-btn">Build position</button>
+      <button id="construct-btn">Edit position</button>
     </div>
 
     <div id="construct-toolbar" hidden>
       <button id="color-black" class="color-btn active">&#9679; Black</button>
       <button id="color-white" class="color-btn">&#9675; White</button>
       <button id="construct-clear">Clear</button>
-      <button id="construct-close" aria-label="Close builder">&times;</button>
+      <button id="construct-close">Hide</button>
     </div>
 
     <div id="sharing" hidden>
       <a id="share-link" href="" target="_blank" rel="noopener" class="share-link"></a>
-      <button id="download-btn">Download</button>
+      <button id="copy-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        <span>Copy</span>
+      </button>
+      <button id="qr-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="2" y="2" width="9" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/><rect x="5" y="5" width="3" height="3"/><rect x="13" y="2" width="9" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/><rect x="16" y="5" width="3" height="3"/><rect x="2" y="13" width="9" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="2"/><rect x="5" y="16" width="3" height="3"/><rect x="13" y="13" width="3" height="3"/><rect x="18" y="13" width="3" height="3"/><rect x="13" y="18" width="3" height="3"/><rect x="18" y="18" width="3" height="3"/></svg>
+        <span>QR</span>
+      </button>
+      <button id="download-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Download SGF
+      </button>
     </div>
 
     <p id="status" hidden>Decoding&hellip;</p>
@@ -58,6 +69,16 @@
     <div id="board"></div>
   </main>
 
+  <div id="qr-modal" hidden>
+    <div id="qr-modal-content">
+      <div id="qr-display"></div>
+      <button id="qr-close" aria-label="Close QR code">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <script src="qrcode.js"></script>
   <script type="module">
     import { encode }           from './encode.js';
     import { decode, download } from './decode.js';
@@ -71,6 +92,10 @@
     const sharingEl   = document.getElementById('sharing');
     const shareLinkEl = document.getElementById('share-link');
     const downloadBtn = document.getElementById('download-btn');
+    const qrModal     = document.getElementById('qr-modal');
+    const qrDisplay   = document.getElementById('qr-display');
+    const copyBtn     = document.getElementById('copy-btn');
+    const qrBtn       = document.getElementById('qr-btn');
     const sgfPanel    = document.getElementById('sgf-panel');
     const textarea    = document.getElementById('sgf-input');
     const fileInput   = document.getElementById('file-input');
@@ -92,6 +117,7 @@
       board.innerHTML = '';
       gameInfo.hidden   = true;
       sharingEl.hidden  = true;
+      qrModal.hidden    = true;
       errorEl.hidden    = true;
       statusEl.hidden   = true;
 
@@ -111,6 +137,7 @@
         render(sgf);
         shareLinkEl.href = location.href;
         shareLinkEl.textContent = location.href;
+        if (!qrModal.hidden) renderQR();
       } else {
         textarea.value = '';
         sgfPanel.open  = true;
@@ -136,6 +163,7 @@
           history.replaceState(null, '', '#' + fragment);
           shareLinkEl.href = location.href;
           shareLinkEl.textContent = location.href;
+          if (!qrModal.hidden) renderQR();
         } catch {}
       }, 400);
     }
@@ -148,6 +176,7 @@
         board.innerHTML  = '';
         gameInfo.hidden  = true;
         sharingEl.hidden = true;
+        qrModal.hidden   = true;
         return;
       }
 
@@ -158,6 +187,7 @@
         board.innerHTML  = '';
         gameInfo.hidden  = true;
         sharingEl.hidden = true;
+        qrModal.hidden   = true;
         showError(e.message);
         return;
       }
@@ -179,7 +209,6 @@
 
       const rawName   = props.GN?.[0]?.trim() || 'kifu';
       currentFilename = rawName.replace(/[/\\:*?"<>|]/g, '_').trim() + '.sgf';
-      downloadBtn.textContent = `Download ${currentFilename}`;
 
       renderGoban(trees, board, gobanOpts);
       sharingEl.hidden = false;
@@ -198,6 +227,46 @@
 
     downloadBtn.addEventListener('click', () => {
       download(textarea.value.trim(), currentFilename);
+    });
+
+    // ── QR code ───────────────────────────────────────────────────────────────
+
+    function renderQR() {
+      const url = shareLinkEl.href;
+      if (!url) { qrDisplay.innerHTML = ''; return; }
+      try {
+        const qr = qrcode(0, 'M');
+        qr.addData(url);
+        qr.make();
+        qrDisplay.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 4, scalable: true });
+      } catch {
+        qrDisplay.innerHTML = '';
+      }
+    }
+
+    copyBtn.addEventListener('click', () => {
+      const textEl = copyBtn.querySelector('span');
+      navigator.clipboard.writeText(shareLinkEl.href).then(() => {
+        textEl.textContent = 'Copied!';
+        setTimeout(() => { textEl.textContent = 'Copy'; }, 2000);
+      });
+    });
+
+    qrBtn.addEventListener('click', () => {
+      qrModal.hidden = false;
+      renderQR();
+    });
+
+    document.getElementById('qr-close').addEventListener('click', () => {
+      qrModal.hidden = true;
+    });
+
+    qrModal.addEventListener('click', e => {
+      if (e.target === qrModal) qrModal.hidden = true;
+    });
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && !qrModal.hidden) qrModal.hidden = true;
     });
 
     // ── File picker ───────────────────────────────────────────────────────────
