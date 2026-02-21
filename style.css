@@ -24,12 +24,17 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 2rem 1rem 4rem;
-  gap: 2.5rem;
+  padding: 0.75rem 0 4rem;
+  gap: 1.5rem;
 }
 
 header {
-  text-align: center;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0 1rem 0.75rem;
+  border-bottom: 1px solid #ddd;
 }
 
 main {
@@ -43,12 +48,20 @@ main {
 /* ── Header ──────────────────────────────────────────────────────────────── */
 
 .wordmark {
-  display: inline-block;
-  font-size: 2rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 1.25rem;
   font-weight: 700;
   letter-spacing: -0.03em;
   color: #1a1a1a;
   text-decoration: none;
+  flex-shrink: 0;
+}
+
+.wordmark img {
+  width: 18px;
+  height: 18px;
 }
 
 .wordmark:hover {
@@ -56,9 +69,26 @@ main {
 }
 
 .tagline {
-  margin-top: 0.25rem;
-  font-size: 0.9rem;
-  color: #666;
+  font-size: 0.8rem;
+  color: #888;
+}
+
+.github-link {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  color: #999;
+  flex-shrink: 0;
+}
+
+.github-link:hover {
+  color: #1a1a1a;
+}
+
+.github-link svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
 }
 
 /* ── Status ──────────────────────────────────────────────────────────────── */
