@@ -1,0 +1,1061 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>fixture editor</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: monospace; background: #111; color: #ccc; margin: 0; padding: 1rem; }
+    h1 { font-size: 1rem; margin: 0 0 0.75rem 0; color: #eee; }
+    .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-bottom: 0.6rem; }
+    button { background: #222; border: 1px solid #444; color: #ccc; padding: 0.3rem 0.65rem; cursor: pointer; font: inherit; }
+    button:hover:not(:disabled) { background: #333; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    label.file-btn { background: #222; border: 1px solid #444; color: #ccc; padding: 0.3rem 0.65rem; cursor: pointer; font: inherit; }
+    label.file-btn:hover { background: #333; }
+    .param { display: flex; align-items: center; gap: 0.35rem; font-size: 0.78rem; color: #aaa; }
+    .param input[type="number"] { width: 3.2em; font: inherit; background: #222; border: 1px solid #444; color: #ccc; padding: 0.2rem 0.3rem; text-align: center; }
+    #status { font-size: 0.78rem; color: #777; margin: 0.2rem 0 0.75rem; min-height: 1.2em; }
+    canvas { display: block; border: 1px solid #222; background: #000; }
+    #canvas-input { max-width: 720px; touch-action: none; }
+    #board-canvas { cursor: pointer; margin-top: 0.5rem; }
+    .tool-btn.active { background: #3a3a5a; border-color: #7c5cbf; color: #ddf; }
+    #metrics { font-size: 0.78rem; color: #777; margin: 0 0 0.4rem; min-height: 1.2em; }
+    #fixture-out { background: #0a0a0a; border: 1px solid #2a2a2a; padding: 0.5rem; font-size: 0.72rem; color: #7d7; white-space: pre-wrap; word-break: break-all; max-height: 12rem; overflow-y: auto; margin-top: 0.3rem; }
+    .stages { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .stage { }
+    .stage-label { font-size: 0.7rem; color: #555; margin-bottom: 0.2rem; }
+  </style>
+</head>
+<body>
+  <h1>fixture editor</h1>
+  <div id="status">Loading OpenCV.js…</div>
+
+  <div class="row">
+    <label class="file-btn">Open image <input type="file" id="file-input" accept="image/*" hidden></label>
+    <button id="run-btn" disabled>Run Pipeline</button>
+    <span class="param">
+      <label>Rows</label>
+      <input type="number" id="board-rows" min="2" max="25" placeholder="auto">
+    </span>
+    <span class="param">
+      <label>Cols</label>
+      <input type="number" id="board-cols" min="2" max="25" placeholder="auto">
+    </span>
+  </div>
+
+  <div class="row">
+    <button id="copy-fixture-btn" disabled>Copy Fixture</button>
+    <button id="paste-fixture-btn">Paste Fixture</button>
+  </div>
+
+  <div class="row">
+    <button id="tool-move" class="tool-btn active">Move</button>
+    <button id="tool-fit" class="tool-btn">Fit</button>
+    <span style="color:#444; margin:0 0.1rem;">|</span>
+    <button id="pin-corners-btn">Pin Corners</button>
+    <button id="reset-dots-btn">Reset</button>
+    <span style="color:#444; margin:0 0.1rem;">|</span>
+    <button id="toggle-dumbbells" class="tool-btn">Dumbbells</button>
+  </div>
+
+  <div id="metrics"></div>
+
+  <div class="stages">
+    <div class="stage">
+      <div class="stage-label">input</div>
+      <canvas id="canvas-input"></canvas>
+    </div>
+    <div class="stage">
+      <div class="stage-label">board</div>
+      <canvas id="board-canvas"></canvas>
+    </div>
+  </div>
+
+  <pre id="fixture-out" hidden></pre>
+
+  <script>
+    var Module = {
+      onRuntimeInitialized() {
+        document.getElementById('status').textContent = 'OpenCV ready.';
+        document.getElementById('run-btn').disabled = false;
+      }
+    };
+  </script>
+  <script async src="https://docs.opencv.org/4.x/opencv.js" type="text/javascript"></script>
+
+  <script type="module">
+    import {
+      classifyStones, enhanceGray, rectifyBoard,
+      buildDetectionFromGrid, fitTPS, evalTPS,
+    } from '../photo-pipeline.js';
+    import { runPipeline as sharedRunPipeline } from '../run-pipeline.js';
+
+    const el = id => document.getElementById(id);
+
+    const canvasInput = el('canvas-input');
+    const ctxInput    = canvasInput.getContext('2d');
+    const boardCanvas = el('board-canvas');
+    const ctxBoard    = boardCanvas.getContext('2d');
+
+    let imageLoaded = false;
+    let currentFilename = '';
+    let nRows = 0, nCols = 0;
+    let editableStones = null; // 2D array [r][c] = 'B' | 'W' | '.'
+    let lastRectCorners = null;
+    let lastRectW = 0, lastRectH = 0;
+
+    // Source image for redrawing under dots
+    let sourceImage = null; // HTMLImageElement
+    let sourceW = 0, sourceH = 0;
+
+    // Input dots: flat array of {x, y, r, c} in original image coords
+    let inputDots = null;
+
+    // Viewport state for pan/zoom on input canvas
+    let viewport = { scale: 1, panX: 0, panY: 0 };
+
+    // Tab-zoom cycling state
+    let tabZoomIndex = -1; // -1 = zoomed out, 0..N-1 = index into sorted pin list
+
+    // Dumbbell overlay toggle
+    let showDumbbells = false;
+
+    // ── Load image ──────────────────────────────────────────────────────────
+    function loadImage(file, { autoRun = false } = {}) {
+      currentFilename = file.name;
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        const maxW = 4032, maxH = 4032;
+        let w = img.naturalWidth, h = img.naturalHeight;
+        const scale = Math.min(1, maxW / w, maxH / h);
+        w = Math.round(w * scale); h = Math.round(h * scale);
+        canvasInput.width = w; canvasInput.height = h;
+        sourceImage = img;
+        sourceW = w; sourceH = h;
+        inputDots = null;
+        pipelineDots = null;
+        pinnedDots.clear();
+        lastFit = null;
+        lastRectCorners = null;
+        lastRectW = 0; lastRectH = 0;
+        el('board-rows').value = '';
+        el('board-cols').value = '';
+        viewport = { scale: 1, panX: 0, panY: 0 };
+        setActiveTool('move');
+        drawInputCanvas();
+        imageLoaded = true;
+        el('status').textContent = `Loaded ${currentFilename} (${w}×${h})`;
+        if (autoRun) runPipeline();
+      };
+      img.src = url;
+    }
+
+    el('file-input').addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (file) loadImage(file);
+    });
+
+    // ── Draw input canvas (image + dots + grid curves) ──────────────────────
+    function drawInputCanvas() {
+      if (!sourceImage) return;
+      const ctx = ctxInput;
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, canvasInput.width, canvasInput.height);
+      ctx.setTransform(viewport.scale, 0, 0, viewport.scale, viewport.panX, viewport.panY);
+      ctx.drawImage(sourceImage, 0, 0, sourceW, sourceH);
+
+      // Draw fitted grid curves in fit mode
+      if (activeTool === 'fit' && lastFit && inputDots) {
+        const steps = 50;
+        ctx.strokeStyle = 'rgba(160, 140, 240, 0.55)';
+        ctx.lineWidth = 2 / viewport.scale;
+        // Row curves
+        for (let r = 0; r < nRows; r++) {
+          ctx.beginPath();
+          for (let s = 0; s <= steps; s++) {
+            const c = s * (nCols - 1) / steps;
+            const { x: px, y: py } = evalGridFit(r, c);
+            if (s === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+          }
+          ctx.stroke();
+        }
+        // Column curves
+        for (let c = 0; c < nCols; c++) {
+          ctx.beginPath();
+          for (let s = 0; s <= steps; s++) {
+            const r = s * (nRows - 1) / steps;
+            const { x: px, y: py } = evalGridFit(r, c);
+            if (s === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+          }
+          ctx.stroke();
+        }
+      }
+
+      // Dumbbell overlay: pipeline → current position
+      if (showDumbbells && pipelineDots && inputDots) {
+        const baseDotRadius = Math.max(6, sourceW / 80);
+        const smallR = (baseDotRadius / viewport.scale) * 0.4;
+        ctx.lineWidth = Math.max(1, sourceW / 600) / viewport.scale;
+        for (let i = 0; i < inputDots.length; i++) {
+          const cur = inputDots[i];
+          const pip = pipelineDots[i];
+          const dist = Math.hypot(cur.x - pip.x, cur.y - pip.y);
+          const t = Math.min(dist / 15, 1);
+          const r = Math.round(t < 0.5 ? t * 2 * 255 : 255);
+          const g = Math.round(t < 0.5 ? 255 : (1 - t) * 2 * 255);
+          const color = `rgb(${r},${g},0)`;
+          ctx.strokeStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(pip.x, pip.y);
+          ctx.lineTo(cur.x, cur.y);
+          ctx.stroke();
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.arc(pip.x, pip.y, smallR, 0, 2 * Math.PI);
+          ctx.fill();
+        }
+      }
+
+      if (inputDots) {
+        const baseDotRadius = Math.max(6, sourceW / 80);
+        const dotRadius = baseDotRadius / viewport.scale;
+        ctx.lineWidth = Math.max(1, sourceW / 600) / viewport.scale;
+        for (let i = 0; i < inputDots.length; i++) {
+          const dot = inputDots[i];
+          const pinned = pinnedDots.has(i);
+          if (activeTool === 'fit' && pinned) {
+            // Draw square for pinned dots (only visible in fit mode)
+            const half = dotRadius * 0.85;
+            ctx.fillStyle = 'rgba(124, 92, 191, 0.7)';
+            ctx.strokeStyle = 'rgba(160, 130, 220, 0.9)';
+            ctx.fillRect(dot.x - half, dot.y - half, half * 2, half * 2);
+            ctx.strokeRect(dot.x - half, dot.y - half, half * 2, half * 2);
+          } else {
+            // Draw circle for unpinned dots (or all dots in move mode)
+            ctx.beginPath();
+            ctx.arc(dot.x, dot.y, dotRadius, 0, 2 * Math.PI);
+            ctx.fillStyle = 'rgba(0, 200, 80, 0.55)';
+            ctx.strokeStyle = 'rgba(0, 255, 100, 0.8)';
+            ctx.fill();
+            ctx.stroke();
+          }
+        }
+      }
+      ctx.restore();
+    }
+
+    // ── Coordinate conversion ───────────────────────────────────────────────
+    function screenToImage(sx, sy) {
+      const rect = canvasInput.getBoundingClientRect();
+      const cssToCanvas = canvasInput.width / rect.width;
+      const cx = (sx - rect.left) * cssToCanvas;
+      const cy = (sy - rect.top) * cssToCanvas;
+      return {
+        x: (cx - viewport.panX) / viewport.scale,
+        y: (cy - viewport.panY) / viewport.scale,
+      };
+    }
+
+    function findNearestDot(ix, iy) {
+      if (!inputDots) return -1;
+      const hitRadius = Math.max(6, sourceW / 80) / viewport.scale;
+      let bestIdx = -1, bestDist = hitRadius;
+      for (let i = 0; i < inputDots.length; i++) {
+        const d = Math.hypot(inputDots[i].x - ix, inputDots[i].y - iy);
+        if (d < bestDist) { bestDist = d; bestIdx = i; }
+      }
+      return bestIdx;
+    }
+
+    // ── Tool & pin state ────────────────────────────────────────────────────
+    let activeTool = 'move'; // 'move' | 'fit'
+    let pinnedDots = new Set(); // indices into inputDots
+    let lastFit = null; // { coeffsX, coeffsY, degree } or null
+
+    // Pipeline-output dot positions for Reset
+    let pipelineDots = null; // array of {x, y, r, c} snapshot
+
+    // ── TPS grid fitting ───────────────────────────────────────────────────
+    // Two TPS models: (r,c) → imageX and (r,c) → imageY
+    // fitTPS expects [{x, y, target}] where x,y are inputs, target is output.
+    // We use r→x, c→y in TPS coordinate space (grid coords as input).
+
+    function fitGridTPS() {
+      if (!inputDots || pinnedDots.size < 3) { lastFit = null; return; }
+      const lambda = 0.001;
+
+      const ptsX = []; // for predicting image-X from (r,c)
+      const ptsY = []; // for predicting image-Y from (r,c)
+      for (const idx of pinnedDots) {
+        const dot = inputDots[idx];
+        ptsX.push({ x: dot.r, y: dot.c, target: dot.x });
+        ptsY.push({ x: dot.r, y: dot.c, target: dot.y });
+      }
+
+      const tpsX = fitTPS(ptsX, lambda);
+      const tpsY = fitTPS(ptsY, lambda);
+      if (!tpsX || !tpsY) { lastFit = null; return; }
+
+      lastFit = { tpsX, tpsY };
+    }
+
+    function evalGridFit(r, c) {
+      const { tpsX, tpsY } = lastFit;
+      return { x: evalTPS(tpsX, r, c), y: evalTPS(tpsY, r, c) };
+    }
+
+    function applyFit() {
+      if (!lastFit || !inputDots) return;
+      for (let i = 0; i < inputDots.length; i++) {
+        if (pinnedDots.has(i)) continue;
+        const dot = inputDots[i];
+        const { x, y } = evalGridFit(dot.r, dot.c);
+        dot.x = x;
+        dot.y = y;
+      }
+    }
+
+    function refitAndRedraw({ reclassify = false } = {}) {
+      fitGridTPS();
+      applyFit();
+      drawInputCanvas();
+      if (reclassify) {
+        runPipeline({ forcedGrid: inputDots });
+      } else {
+        updateMetrics();
+      }
+    }
+
+    // ── Metrics display ──────────────────────────────────────────────────────
+    function updateMetrics() {
+      const metricsEl = el('metrics');
+      if (!inputDots || !pipelineDots || !editableStones) {
+        metricsEl.textContent = '';
+        return;
+      }
+      // Stone counts
+      let bCount = 0, wCount = 0;
+      for (const row of editableStones) {
+        for (const s of row) {
+          if (s === 'B') bCount++;
+          else if (s === 'W') wCount++;
+        }
+      }
+      // Displacement stats
+      let sum = 0, max = 0;
+      for (let i = 0; i < inputDots.length; i++) {
+        const d = Math.hypot(inputDots[i].x - pipelineDots[i].x, inputDots[i].y - pipelineDots[i].y);
+        sum += d;
+        if (d > max) max = d;
+      }
+      const mean = sum / inputDots.length;
+      metricsEl.textContent = `B:${bCount} W:${wCount} · mean Δ ${mean.toFixed(1)}px max ${max.toFixed(1)}px`;
+    }
+
+    // ── Tool palette ─────────────────────────────────────────────────────────
+    function setActiveTool(tool, { refit = true } = {}) {
+      activeTool = tool;
+      el('tool-move').classList.toggle('active', tool === 'move');
+      el('tool-fit').classList.toggle('active', tool === 'fit');
+      if (refit && tool === 'fit' && pinnedDots.size >= 3) refitAndRedraw();
+      else drawInputCanvas();
+    }
+
+    el('tool-move').addEventListener('click', () => setActiveTool('move'));
+    el('tool-fit').addEventListener('click', () => {
+      setActiveTool('fit');
+      if (pinnedDots.size >= 3) runPipeline({ forcedGrid: inputDots });
+    });
+
+    el('pin-corners-btn').addEventListener('click', () => {
+      if (!inputDots || nRows === 0 || nCols === 0) return;
+      pinCorners();
+      tabZoomIndex = -1;
+      setActiveTool('fit');
+    });
+
+    el('reset-dots-btn').addEventListener('click', () => {
+      if (!inputDots) return;
+      if (pipelineDots) {
+        for (let i = 0; i < inputDots.length; i++) {
+          inputDots[i].x = pipelineDots[i].x;
+          inputDots[i].y = pipelineDots[i].y;
+        }
+      }
+      pinnedDots.clear();
+      lastFit = null;
+      tabZoomIndex = -1;
+      setActiveTool('move');
+      runPipeline({ forcedGrid: inputDots });
+    });
+
+    // ── Dumbbells toggle ─────────────────────────────────────────────────────
+    el('toggle-dumbbells').addEventListener('click', () => {
+      showDumbbells = !showDumbbells;
+      el('toggle-dumbbells').classList.toggle('active', showDumbbells);
+      drawInputCanvas();
+    });
+
+    // Set tabZoomIndex so next Tab press lands on the given dot index
+    function queueTabZoom(dotIdx) {
+      const pinList = [...pinnedDots].sort((a, b) => a - b);
+      const pos = pinList.indexOf(dotIdx);
+      tabZoomIndex = pos >= 0 ? pos - 1 : -1;
+    }
+
+    // ── Tab zoom cycling ─────────────────────────────────────────────────────
+    document.addEventListener('keydown', e => {
+      if (e.key === '-') {
+        viewport = { scale: 1, panX: 0, panY: 0 };
+        tabZoomIndex = -1;
+        drawInputCanvas();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      e.preventDefault();
+      const pinList = [...pinnedDots].sort((a, b) => a - b);
+      if (pinList.length === 0) return;
+      tabZoomIndex++;
+      if (tabZoomIndex >= pinList.length) tabZoomIndex = -1;
+      if (tabZoomIndex === -1) {
+        viewport = { scale: 1, panX: 0, panY: 0 };
+      } else {
+        const dot = inputDots[pinList[tabZoomIndex]];
+        viewport.scale = 4;
+        viewport.panX = canvasInput.width / 2 - dot.x * 4;
+        viewport.panY = canvasInput.height / 2 - dot.y * 4;
+      }
+      drawInputCanvas();
+    });
+
+    function pinCorners() {
+      pinnedDots.clear();
+      pinnedDots.add(0);
+      pinnedDots.add(nCols - 1);
+      pinnedDots.add((nRows - 1) * nCols);
+      pinnedDots.add(nRows * nCols - 1);
+    }
+
+    // ── Dimension change → regenerate dots ──────────────────────────────────
+    function onDimensionChange() {
+      const newR = +el('board-rows').value || 0;
+      const newC = +el('board-cols').value || 0;
+      if (newR < 2 || newC < 2 || !sourceImage) return;
+      nRows = newR;
+      nCols = newC;
+
+      // Generate uniform grid spanning board area or full image
+      let x0, y0, x1, y1;
+      if (lastRectCorners) {
+        x0 = Math.min(...lastRectCorners.map(p => p.x));
+        y0 = Math.min(...lastRectCorners.map(p => p.y));
+        x1 = Math.max(...lastRectCorners.map(p => p.x));
+        y1 = Math.max(...lastRectCorners.map(p => p.y));
+      } else {
+        const margin = 0.05;
+        x0 = sourceW * margin; y0 = sourceH * margin;
+        x1 = sourceW * (1 - margin); y1 = sourceH * (1 - margin);
+      }
+
+      inputDots = [];
+      for (let r = 0; r < nRows; r++) {
+        for (let c = 0; c < nCols; c++) {
+          const fx = nCols > 1 ? c / (nCols - 1) : 0.5;
+          const fy = nRows > 1 ? r / (nRows - 1) : 0.5;
+          inputDots.push({ x: x0 + fx * (x1 - x0), y: y0 + fy * (y1 - y0), r, c });
+        }
+      }
+      pipelineDots = inputDots.map(d => ({ x: d.x, y: d.y, r: d.r, c: d.c }));
+
+      editableStones = Array.from({ length: nRows }, () => Array(nCols).fill('.'));
+      tabZoomIndex = -1;
+      pinCorners();
+      setActiveTool('fit');
+      drawBoard();
+      updateMetrics();
+    }
+
+    el('board-rows').addEventListener('input', onDimensionChange);
+    el('board-cols').addEventListener('input', onDimensionChange);
+
+    // ── Mouse interaction on input canvas ───────────────────────────────────
+    let draggingDot = -1; // index of dot being dragged
+    let clickedDot = -1;  // index of dot clicked (for pin toggle in fit mode)
+    let clickedDotWasPinned = false; // was the dot already pinned before mousedown?
+    let dragStart = { x: 0, y: 0 }; // image coords at drag start
+    let dragDotStart = { x: 0, y: 0 }; // dot position at drag start
+    let didDrag = false;
+    let isPanning = false;
+    let panStart = { x: 0, y: 0 };
+
+    canvasInput.addEventListener('mousedown', e => {
+      const { x, y } = screenToImage(e.clientX, e.clientY);
+      const dotIdx = findNearestDot(x, y);
+
+      if (dotIdx >= 0) {
+        if (activeTool === 'move') {
+          // Move mode: start dragging any dot
+          draggingDot = dotIdx;
+          clickedDot = -1;
+          dragStart = { x, y };
+          dragDotStart = { x: inputDots[dotIdx].x, y: inputDots[dotIdx].y };
+          didDrag = false;
+          e.preventDefault();
+        } else {
+          // Fit mode: pin unpinned dots immediately, start drag
+          clickedDotWasPinned = pinnedDots.has(dotIdx);
+          clickedDot = dotIdx;
+          didDrag = false;
+          if (!clickedDotWasPinned) {
+            pinnedDots.add(dotIdx);
+            queueTabZoom(dotIdx);
+            refitAndRedraw();
+          }
+          draggingDot = dotIdx;
+          dragStart = { x, y };
+          dragDotStart = { x: inputDots[dotIdx].x, y: inputDots[dotIdx].y };
+          e.preventDefault();
+        }
+      } else {
+        // Empty space: pan
+        isPanning = true;
+        panStart = { x: e.clientX, y: e.clientY };
+        e.preventDefault();
+      }
+    });
+
+    window.addEventListener('mousemove', e => {
+      if (draggingDot >= 0) {
+        const { x, y } = screenToImage(e.clientX, e.clientY);
+        const dx = x - dragStart.x;
+        const dy = y - dragStart.y;
+        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) didDrag = true;
+        inputDots[draggingDot].x = dragDotStart.x + dx;
+        inputDots[draggingDot].y = dragDotStart.y + dy;
+        if (activeTool === 'fit') refitAndRedraw();
+        else drawInputCanvas();
+      } else if (isPanning) {
+        const rect = canvasInput.getBoundingClientRect();
+        const cssToCanvas = canvasInput.width / rect.width;
+        const dx = (e.clientX - panStart.x) * cssToCanvas;
+        const dy = (e.clientY - panStart.y) * cssToCanvas;
+        viewport.panX += dx;
+        viewport.panY += dy;
+        panStart = { x: e.clientX, y: e.clientY };
+        drawInputCanvas();
+      }
+    });
+
+    window.addEventListener('mouseup', e => {
+      if (draggingDot >= 0 && didDrag) runPipeline({ forcedGrid: inputDots });
+      draggingDot = -1;
+      // Fit mode: click without drag
+      if (clickedDot >= 0 && activeTool === 'fit' && !didDrag) {
+        if (clickedDotWasPinned) {
+          // Unpin
+          pinnedDots.delete(clickedDot);
+          tabZoomIndex = -1;
+        }
+        // Pin or unpin changed the fit — reclassify
+        refitAndRedraw({ reclassify: true });
+      }
+      clickedDot = -1;
+      if (isPanning) {
+        isPanning = false;
+      }
+    });
+
+    // ── Mouse wheel: scroll to pan, pinch (ctrl+wheel) to zoom ─────────────
+    canvasInput.addEventListener('wheel', e => {
+      e.preventDefault();
+      const rect = canvasInput.getBoundingClientRect();
+      const cssToCanvas = canvasInput.width / rect.width;
+
+      if (e.ctrlKey) {
+        // Pinch-to-zoom (trackpad) or ctrl+scroll (mouse)
+        const zoomFactor = e.deltaY < 0 ? 1.06 : 1 / 1.06;
+        const newScale = Math.min(10, Math.max(0.5, viewport.scale * zoomFactor));
+        const { x: ix, y: iy } = screenToImage(e.clientX, e.clientY);
+        const cx = (e.clientX - rect.left) * cssToCanvas;
+        const cy = (e.clientY - rect.top) * cssToCanvas;
+        viewport.scale = newScale;
+        viewport.panX = cx - ix * newScale;
+        viewport.panY = cy - iy * newScale;
+      } else {
+        // Two-finger scroll → pan
+        viewport.panX -= e.deltaX * cssToCanvas;
+        viewport.panY -= e.deltaY * cssToCanvas;
+      }
+      drawInputCanvas();
+    }, { passive: false });
+
+    // ── Touch interaction on input canvas ────────────────────────────────────
+    let touchDragDot = -1;
+    let touchDragStart = null; // image coords
+    let touchDotStart = null;  // dot position at start
+    let touchDidDrag = false;
+    let touchDotWasPinned = false;
+    let touchPanStart = null;
+    let pinchStart = null; // { dist, midX, midY, scale, panX, panY }
+
+    function touchDist(t1, t2) {
+      return Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+    }
+    function touchMid(t1, t2) {
+      return { x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2 };
+    }
+
+    canvasInput.addEventListener('touchstart', e => {
+      if (e.touches.length === 1) {
+        const t = e.touches[0];
+        const { x, y } = screenToImage(t.clientX, t.clientY);
+        const dotIdx = findNearestDot(x, y);
+        if (dotIdx >= 0) {
+          touchDotWasPinned = pinnedDots.has(dotIdx);
+          touchDragDot = dotIdx;
+          touchDidDrag = false;
+          // In fit mode, auto-pin unpinned dots
+          if (activeTool === 'fit' && !touchDotWasPinned) {
+            pinnedDots.add(dotIdx);
+            queueTabZoom(dotIdx);
+            refitAndRedraw();
+          }
+          if (activeTool === 'move' || activeTool === 'fit') {
+            touchDragStart = { x, y };
+            touchDotStart = { x: inputDots[dotIdx].x, y: inputDots[dotIdx].y };
+          }
+          e.preventDefault();
+        } else {
+          touchPanStart = { x: t.clientX, y: t.clientY };
+          e.preventDefault();
+        }
+      } else if (e.touches.length === 2) {
+        touchDragDot = -1;
+        touchPanStart = null;
+        const d = touchDist(e.touches[0], e.touches[1]);
+        const mid = touchMid(e.touches[0], e.touches[1]);
+        pinchStart = { dist: d, midX: mid.x, midY: mid.y, scale: viewport.scale, panX: viewport.panX, panY: viewport.panY };
+        e.preventDefault();
+      }
+    }, { passive: false });
+
+    canvasInput.addEventListener('touchmove', e => {
+      if (e.touches.length === 1 && touchDragDot >= 0 && touchDotStart) {
+        const t = e.touches[0];
+        const { x, y } = screenToImage(t.clientX, t.clientY);
+        const dx = x - touchDragStart.x;
+        const dy = y - touchDragStart.y;
+        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) touchDidDrag = true;
+        inputDots[touchDragDot].x = touchDotStart.x + dx;
+        inputDots[touchDragDot].y = touchDotStart.y + dy;
+        if (activeTool === 'fit') refitAndRedraw();
+        else drawInputCanvas();
+        e.preventDefault();
+      } else if (e.touches.length === 1 && touchPanStart) {
+        const t = e.touches[0];
+        const rect = canvasInput.getBoundingClientRect();
+        const cssToCanvas = canvasInput.width / rect.width;
+        const dx = (t.clientX - touchPanStart.x) * cssToCanvas;
+        const dy = (t.clientY - touchPanStart.y) * cssToCanvas;
+        viewport.panX += dx;
+        viewport.panY += dy;
+        touchPanStart = { x: t.clientX, y: t.clientY };
+        drawInputCanvas();
+        e.preventDefault();
+      } else if (e.touches.length === 2 && pinchStart) {
+        const d = touchDist(e.touches[0], e.touches[1]);
+        const mid = touchMid(e.touches[0], e.touches[1]);
+        const ratio = d / pinchStart.dist;
+        const newScale = Math.min(10, Math.max(0.5, pinchStart.scale * ratio));
+
+        const rect = canvasInput.getBoundingClientRect();
+        const cssToCanvas = canvasInput.width / rect.width;
+        const midCX = (mid.x - rect.left) * cssToCanvas;
+        const midCY = (mid.y - rect.top) * cssToCanvas;
+
+        const origMidCX = (pinchStart.midX - rect.left) * cssToCanvas;
+        const origMidCY = (pinchStart.midY - rect.top) * cssToCanvas;
+        const ix = (origMidCX - pinchStart.panX) / pinchStart.scale;
+        const iy = (origMidCY - pinchStart.panY) / pinchStart.scale;
+
+        viewport.scale = newScale;
+        viewport.panX = midCX - ix * newScale;
+        viewport.panY = midCY - iy * newScale;
+        drawInputCanvas();
+        e.preventDefault();
+      }
+    }, { passive: false });
+
+    canvasInput.addEventListener('touchend', e => {
+      if (e.touches.length < 2) pinchStart = null;
+      if (e.touches.length === 0) {
+        if (touchDragDot >= 0 && touchDidDrag) runPipeline({ forcedGrid: inputDots });
+        if (touchDragDot >= 0 && activeTool === 'fit' && !touchDidDrag) {
+          if (touchDotWasPinned) {
+            pinnedDots.delete(touchDragDot);
+            tabZoomIndex = -1;
+          }
+          refitAndRedraw({ reclassify: true });
+        }
+        touchDragDot = -1;
+        touchDragStart = null;
+        touchDotStart = null;
+        touchPanStart = null;
+      }
+    });
+
+    // ── Run pipeline ────────────────────────────────────────────────────────
+    el('run-btn').addEventListener('click', runPipeline);
+
+    function runPipeline({ forcedGrid } = {}) {
+      if (!imageLoaded) return;
+      // forcedGrid path requires a previous full pipeline run
+      if (forcedGrid && !lastRectCorners) return;
+
+      const userRows = +el('board-rows').value || 0;
+      const userCols = +el('board-cols').value || 0;
+      const hintN = Math.max(userRows, userCols) || 19;
+      const toDelete = [];
+      const mat = m => { toDelete.push(m); return m; };
+
+      try {
+        el('status').textContent = forcedGrid ? 'Reclassifying…' : 'Running pipeline…';
+
+        // Draw clean source image (no overlays) for cv.imread
+        if (sourceImage) {
+          ctxInput.save();
+          ctxInput.setTransform(1, 0, 0, 1, 0, 0);
+          ctxInput.clearRect(0, 0, canvasInput.width, canvasInput.height);
+          ctxInput.drawImage(sourceImage, 0, 0, sourceW, sourceH);
+          ctxInput.restore();
+        }
+        const src   = mat(cv.imread(canvasInput));
+        // Restore overlays after reading
+        drawInputCanvas();
+
+        let classResult, pipeResult;
+
+        if (forcedGrid) {
+          // forcedGrid path: rectify + classify using saved corners
+          const rectCorners = lastRectCorners;
+          const rectW = lastRectW;
+          const rectH = lastRectH;
+          const rectified = mat(rectifyBoard(src, rectCorners, rectW, rectH));
+          const detection = buildDetectionFromGrid(forcedGrid, rectCorners, rectW, rectH);
+
+          nRows = detection.rowPos.length;
+          nCols = detection.colPos.length;
+
+          const rectGrayRaw = mat(new cv.Mat());
+          cv.cvtColor(rectified, rectGrayRaw, cv.COLOR_RGBA2GRAY);
+          const rectGray = mat(enhanceGray(rectGrayRaw, false));
+
+          classResult = classifyStones(rectGray, detection.rowPos, detection.colPos,
+                                       detection.step, detection.rawCircles,
+                                       detection.intersections, true);
+        } else {
+          // Run shared TPS pipeline
+          const grayMat = mat(new cv.Mat());
+          cv.cvtColor(src, grayMat, cv.COLOR_RGBA2GRAY);
+          pipeResult = sharedRunPipeline(
+            { colorMat: src, grayMat, width: src.cols, height: src.rows },
+            { hintN });
+          if (!pipeResult) {
+            el('status').textContent = 'Pipeline failed (grid detection).';
+            return;
+          }
+          nRows = pipeResult.nRows;
+          nCols = pipeResult.nCols;
+          lastRectCorners = pipeResult.rectCorners;
+          lastRectW = pipeResult.rectW;
+          lastRectH = pipeResult.rectH;
+
+          // Build classResult-compatible stones from grid
+          classResult = { stones: [] };
+          for (let r = 0; r < nRows; r++) {
+            for (let c = 0; c < nCols; c++) {
+              const color = pipeResult.grid[r][c];
+              if (color !== '.') classResult.stones.push({ r, c, color });
+            }
+          }
+        }
+
+        el('board-rows').value = nRows;
+        el('board-cols').value = nCols;
+
+        // Initialize editable stones (non-square aware)
+        editableStones = Array.from({ length: nRows }, () => Array(nCols).fill('.'));
+        for (const s of classResult.stones) {
+          if (s.r < nRows && s.c < nCols) {
+            editableStones[s.r][s.c] = s.color;
+          }
+        }
+
+        if (forcedGrid) {
+          // Don't overwrite inputDots or pipelineDots — user is dragging
+          drawBoard();
+          drawInputCanvas();
+          el('status').textContent = `Reclassified ${nRows}×${nCols} board from adjusted grid.`;
+          updateMetrics();
+        } else {
+          // detectedIntersections from shared pipeline are in original image coords
+          inputDots = pipeResult.detectedIntersections.map(d => ({
+            x: d.x, y: d.y, r: d.r, c: d.c,
+          }));
+          // Snapshot for Reset
+          pipelineDots = inputDots.map(d => ({ x: d.x, y: d.y, r: d.r, c: d.c }));
+
+          // Auto-pin corners, stay in Move mode
+          pinCorners();
+          setActiveTool('move');
+
+          drawBoard();
+          el('copy-fixture-btn').disabled = false;
+          el('status').textContent = `Detected ${nRows}×${nCols} board. Click to edit stones. Drag dots on input.`;
+          updateMetrics();
+
+          // Try to auto-load matching fixture JSON
+          tryLoadFixture();
+        }
+
+      } catch (err) {
+        el('status').textContent = 'Error: ' + err.message;
+        console.error(err);
+      } finally {
+        toDelete.forEach(m => { try { m.delete(); } catch {} });
+      }
+    }
+
+    function tryLoadFixture() {
+      if (!currentFilename) return;
+      const base = currentFilename.replace(/\.[^.]+$/, '');
+      const fixturePath = `../fixtures/${base}.fixture.json`;
+      // Cache-bust to always get fresh fixture data
+      fetch(`${fixturePath}?t=${Date.now()}`).then(r => {
+        if (!r.ok) return;
+        return r.json();
+      }).then(fixture => {
+        if (!fixture) return;
+        applyFixture(fixture);
+        el('status').textContent = `Loaded fixture for ${currentFilename}. Click to edit stones.`;
+      }).catch(() => {});
+    }
+
+    // ── Draw interactive board ──────────────────────────────────────────────
+    function drawBoard() {
+      if (!editableStones) return;
+      const R = editableStones.length;
+      const C = editableStones[0].length;
+      const cellSize = 28;
+      const pad = Math.round(cellSize * 0.8);
+      const w = pad * 2 + (C - 1) * cellSize;
+      const h = pad * 2 + (R - 1) * cellSize;
+      boardCanvas.width = w;
+      boardCanvas.height = h;
+
+      // Background
+      ctxBoard.fillStyle = '#d4a44a';
+      ctxBoard.fillRect(0, 0, w, h);
+
+      // Grid lines
+      ctxBoard.strokeStyle = '#333';
+      ctxBoard.lineWidth = 1;
+      for (let r = 0; r < R; r++) {
+        const y = pad + r * cellSize;
+        ctxBoard.beginPath();
+        ctxBoard.moveTo(pad, y); ctxBoard.lineTo(pad + (C-1) * cellSize, y);
+        ctxBoard.stroke();
+      }
+      for (let c = 0; c < C; c++) {
+        const x = pad + c * cellSize;
+        ctxBoard.beginPath();
+        ctxBoard.moveTo(x, pad); ctxBoard.lineTo(x, pad + (R-1) * cellSize);
+        ctxBoard.stroke();
+      }
+
+      // Star points (hoshi) — only for standard square sizes
+      if (R === C) {
+        const N = R;
+        const hoshi = N === 19 ? [3,9,15] : N === 13 ? [3,6,9] : N === 9 ? [2,4,6] : [];
+        ctxBoard.fillStyle = '#333';
+        for (const hr of hoshi) {
+          for (const hc of hoshi) {
+            ctxBoard.beginPath();
+            ctxBoard.arc(pad + hc * cellSize, pad + hr * cellSize, 3, 0, 2 * Math.PI);
+            ctxBoard.fill();
+          }
+        }
+      }
+
+      // Stones
+      const stoneR = Math.floor(cellSize * 0.44);
+      for (let r = 0; r < R; r++) {
+        for (let c = 0; c < C; c++) {
+          const color = editableStones[r][c];
+          if (color === '.') continue;
+          const cx = pad + c * cellSize;
+          const cy = pad + r * cellSize;
+          ctxBoard.beginPath();
+          ctxBoard.arc(cx, cy, stoneR, 0, 2 * Math.PI);
+          if (color === 'B') {
+            ctxBoard.fillStyle = '#111';
+            ctxBoard.strokeStyle = '#444';
+          } else {
+            ctxBoard.fillStyle = '#f0f0f0';
+            ctxBoard.strokeStyle = '#333';
+          }
+          ctxBoard.fill();
+          ctxBoard.lineWidth = 1.5;
+          ctxBoard.stroke();
+        }
+      }
+
+      // Small dots for empty intersections
+      ctxBoard.fillStyle = 'rgba(0,0,0,0.15)';
+      for (let r = 0; r < R; r++) {
+        for (let c = 0; c < C; c++) {
+          if (editableStones[r][c] !== '.') continue;
+          ctxBoard.beginPath();
+          ctxBoard.arc(pad + c * cellSize, pad + r * cellSize, 2, 0, 2 * Math.PI);
+          ctxBoard.fill();
+        }
+      }
+    }
+
+    // ── Click to cycle: empty → B → W → empty ──────────────────────────────
+    boardCanvas.addEventListener('click', e => {
+      if (!editableStones) return;
+      const R = editableStones.length;
+      const C = editableStones[0].length;
+      const cellSize = 28;
+      const pad = Math.round(cellSize * 0.8);
+      const rect = boardCanvas.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) * (boardCanvas.width / rect.width);
+      const my = (e.clientY - rect.top) * (boardCanvas.height / rect.height);
+      const c = Math.round((mx - pad) / cellSize);
+      const r = Math.round((my - pad) / cellSize);
+      if (r < 0 || r >= R || c < 0 || c >= C) return;
+
+      const cur = editableStones[r][c];
+      editableStones[r][c] = cur === '.' ? 'B' : cur === 'B' ? 'W' : '.';
+      drawBoard();
+    });
+
+    // ── Build fixture JSON ──────────────────────────────────────────────────
+    function buildFixtureJSON() {
+      if (!editableStones) return null;
+      const R = editableStones.length;
+      const C = editableStones[0].length;
+
+      // Use inputDots if available (may have been dragged)
+      const origIntersections = inputDots
+        ? inputDots.map(d => [
+            Math.round(d.x * 10) / 10,
+            Math.round(d.y * 10) / 10,
+          ])
+        : null;
+
+      // Build stones array (non-empty only)
+      const stones = [];
+      for (let r = 0; r < R; r++) {
+        for (let c = 0; c < C; c++) {
+          if (editableStones[r][c] !== '.') {
+            stones.push([r, c, editableStones[r][c]]);
+          }
+        }
+      }
+
+      // Resolve filename: try to use ../fixtures/ path
+      let image = currentFilename;
+      if (!image.startsWith('../fixtures/')) {
+        image = '../fixtures/' + image;
+      }
+
+      const fixture = { image, boardRows: R, boardCols: C, stones };
+      if (origIntersections) fixture.intersections = origIntersections;
+      return fixture;
+    }
+
+    // ── Copy fixture ────────────────────────────────────────────────────────
+    el('copy-fixture-btn').addEventListener('click', () => {
+      const fixture = buildFixtureJSON();
+      if (!fixture) return;
+      const json = JSON.stringify(fixture, null, 2);
+      el('fixture-out').textContent = json;
+      el('fixture-out').hidden = false;
+      navigator.clipboard.writeText(json).then(() => {
+        const btn = el('copy-fixture-btn');
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = 'Copy Fixture'; }, 2000);
+      });
+    });
+
+    // ── Apply fixture ─────────────────────────────────────────────────────
+    function applyFixture(fixture) {
+      const R = fixture.boardRows || fixture.boardSize;
+      const C = fixture.boardCols || fixture.boardSize;
+      if (!R || !C || !fixture.stones) return false;
+
+      nRows = R; nCols = C;
+      el('board-rows').value = R;
+      el('board-cols').value = C;
+
+      editableStones = Array.from({ length: R }, () => Array(C).fill('.'));
+      for (const [r, c, color] of fixture.stones) {
+        if (r < R && c < C) editableStones[r][c] = color;
+      }
+
+      if (fixture.intersections) {
+        // Rebuild inputDots from fixture intersections;
+        // keep pipelineDots as the pipeline's original detection
+        // so dumbbells and metrics show the difference
+        inputDots = fixture.intersections.map((pt, i) => ({
+          x: pt[0], y: pt[1],
+          r: Math.floor(i / C),
+          c: i % C,
+        }));
+        pinCorners();
+        setActiveTool('move');
+      }
+
+      drawBoard();
+      drawInputCanvas();
+      updateMetrics();
+      el('copy-fixture-btn').disabled = false;
+      return true;
+    }
+
+    // ── Paste fixture ───────────────────────────────────────────────────────
+    el('paste-fixture-btn').addEventListener('click', async () => {
+      try {
+        const text = await navigator.clipboard.readText();
+        const fixture = JSON.parse(text);
+        if (!applyFixture(fixture)) {
+          el('status').textContent = 'Invalid fixture JSON.';
+          return;
+        }
+        el('status').textContent = `Pasted fixture: ${nRows}×${nCols}, ${fixture.stones.length} stones. Click to edit.`;
+        el('fixture-out').textContent = text;
+        el('fixture-out').hidden = false;
+      } catch (err) {
+        el('status').textContent = 'Paste failed: ' + err.message;
+      }
+    });
+
+    // ── Drag & drop ─────────────────────────────────────────────────────────
+    document.addEventListener('dragover', e => e.preventDefault());
+    document.addEventListener('drop', e => {
+      e.preventDefault();
+      const file = [...e.dataTransfer.items || []]
+        .find(i => i.kind === 'file' && i.type.startsWith('image/'))
+        ?.getAsFile()
+        ?? [...e.dataTransfer.files].find(f => f.type.startsWith('image/'));
+      if (file) loadImage(file, { autoRun: true });
+    });
+  </script>
+</body>
+</html>

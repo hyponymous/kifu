@@ -1,0 +1,1057 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>photo → tsumego prototype</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: monospace; background: #111; color: #ccc; margin: 0; padding: 1rem; }
+    h1 { font-size: 1rem; margin: 0 0 0.75rem 0; color: #eee; }
+    .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-bottom: 0.6rem; }
+    button { background: #222; border: 1px solid #444; color: #ccc; padding: 0.3rem 0.65rem; cursor: pointer; font: inherit; }
+    button:hover:not(:disabled) { background: #333; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    label.file-btn { background: #222; border: 1px solid #444; color: #ccc; padding: 0.3rem 0.65rem; cursor: pointer; font: inherit; }
+    label.file-btn:hover { background: #333; }
+    .param { display: flex; align-items: center; gap: 0.35rem; font-size: 0.78rem; color: #aaa; }
+    .param input[type=range] { width: 90px; }
+    .param .val { min-width: 3ch; color: #eee; }
+    #status { font-size: 0.78rem; color: #777; margin: 0.2rem 0 0.75rem; min-height: 1.2em; }
+    .stages { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .stage { }
+    .stage-label { font-size: 0.7rem; color: #555; margin-bottom: 0.2rem; }
+    canvas { display: block; max-width: min(360px, calc(50vw - 1.5rem)); border: 1px solid #222; background: #000; }
+    #sgf-wrap { margin-top: 1rem; }
+    #sgf-out { background: #0a0a0a; border: 1px solid #2a2a2a; padding: 0.5rem; font-size: 0.72rem; color: #7d7; white-space: pre-wrap; word-break: break-all; max-height: 8rem; overflow-y: auto; margin-top: 0.3rem; }
+    a { color: #666; }
+    video { display: none; }
+  </style>
+</head>
+<body>
+  <h1>photo → tsumego prototype</h1>
+  <div id="status">Loading OpenCV.js (<a href="https://docs.opencv.org/4.x/opencv.js">docs.opencv.org</a>)…</div>
+
+  <div class="row">
+    <button id="paste-btn" disabled>Paste</button>
+    <label class="file-btn">Open file <input type="file" id="file-input" accept="image/*" hidden></label>
+    <button id="camera-btn" disabled>Camera</button>
+    <button id="process-btn" disabled>▶ Detect board</button>
+    <button id="use-full-btn" disabled title="Skip board detection, use whole image as the board">Use full image</button>
+  </div>
+
+  <div class="row">
+    <span class="param">
+      <label>Canny lo</label>
+      <input type="range" id="canny-lo" min="5" max="200" value="50">
+      <span class="val" id="canny-lo-val">50</span>
+    </span>
+    <span class="param">
+      <label>Canny hi</label>
+      <input type="range" id="canny-hi" min="20" max="400" value="125">
+      <span class="val" id="canny-hi-val">125</span>
+    </span>
+    <span class="param">
+      <label>Board</label>
+      <select id="board-size" style="font:inherit;background:#222;border:1px solid #444;color:#ccc;padding:0.2rem">
+        <option value="0">Auto</option>
+        <option value="19" selected>19×19</option>
+        <option value="13">13×13</option>
+        <option value="9">9×9</option>
+      </select>
+    </span>
+    <span class="param" title="Show classifier sampling zones on the stones overlay">
+      <label><input type="checkbox" id="show-patches"> Patches</label>
+    </span>
+    <span class="param" title="Use Tesseract OCR to read move numbers on stones">
+      <label><input type="checkbox" id="read-digits"> Read digits</label>
+    </span>
+  </div>
+
+  <div class="stages">
+    <div class="stage">
+      <div class="stage-label">input</div>
+      <canvas id="canvas-input"></canvas>
+    </div>
+    <div class="stage">
+      <div class="stage-label">edges</div>
+      <canvas id="canvas-edges"></canvas>
+    </div>
+    <div class="stage">
+      <div class="stage-label">rectified</div>
+      <canvas id="canvas-rectified"></canvas>
+    </div>
+    <div class="stage">
+      <div class="stage-label">detect1: features</div>
+      <canvas id="canvas-d1-features"></canvas>
+    </div>
+    <div class="stage">
+      <div class="stage-label">detect1: grid</div>
+      <canvas id="canvas-d1-grid"></canvas>
+    </div>
+    <div class="stage">
+      <div class="stage-label">dewarped</div>
+      <canvas id="canvas-dewarped"></canvas>
+    </div>
+    <div class="stage">
+      <div class="stage-label">enhanced</div>
+      <canvas id="canvas-enhanced"></canvas>
+    </div>
+    <div class="stage">
+      <div class="stage-label">circle sizes</div>
+      <canvas id="canvas-circles"></canvas>
+    </div>
+    <div class="stage">
+      <div class="stage-label">stones overlay</div>
+      <canvas id="canvas-stones"></canvas>
+    </div>
+  </div>
+
+  <!-- positioned near hovered cell via JS -->
+  <div id="debug-panel" style="display:none;position:fixed;background:#111;border:1px solid #333;padding:0.5rem 0.75rem;z-index:100;pointer-events:none">
+    <pre id="debug-content" style="margin:0;font:11px/1.6 monospace;color:#ccc"></pre>
+    <div style="display:flex;gap:6px;margin-top:6px">
+      <div>
+        <div style="font:9px monospace;color:#555;margin-bottom:2px">crop</div>
+        <canvas id="debug-crop-raw" style="display:block;border:1px solid #222"></canvas>
+      </div>
+      <div>
+        <div style="font:9px monospace;color:#555;margin-bottom:2px">+ radii</div>
+        <canvas id="debug-crop-ring" style="display:block;border:1px solid #222"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div id="timing-wrap" style="display:none;margin-top:0.75rem">
+    <canvas id="timing-canvas" style="display:block"></canvas>
+  </div>
+
+  <div id="sgf-wrap" hidden>
+    <div class="row" style="margin-top:0.75rem">
+      <strong style="font-size:0.8rem;color:#eee">SGF</strong>
+      <button id="copy-sgf">Copy</button>
+      <button id="open-main">Open in kifu ↗</button>
+    </div>
+    <pre id="sgf-out"></pre>
+    <div style="display:flex;gap:1rem;margin-top:0.75rem;flex-wrap:wrap;align-items:flex-start">
+      <div>
+        <div style="font-size:0.7rem;color:#555;margin-bottom:0.2rem">rectified</div>
+        <img id="rect-thumb" hidden style="object-fit:contain;border:1px solid #222">
+      </div>
+      <div>
+        <div style="font-size:0.7rem;color:#555;margin-bottom:0.2rem">dewarped</div>
+        <img id="dewarped-thumb" hidden style="object-fit:contain;border:1px solid #222">
+      </div>
+      <div id="board-preview"></div>
+    </div>
+  </div>
+
+  <!-- hidden video for camera -->
+  <video id="camera-video" playsinline></video>
+
+  <script>
+    // OpenCV init — Module must be defined before the script loads
+    var Module = {
+      onRuntimeInitialized() {
+        document.getElementById('status').textContent = 'OpenCV ready.';
+        ['paste-btn', 'camera-btn'].forEach(id =>
+          document.getElementById(id).disabled = false);
+      }
+    };
+  </script>
+  <script async src="https://docs.opencv.org/4.x/opencv.js" type="text/javascript"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
+  <script type="module">
+    import { parse }         from '../sgf-parser.js';
+    import { renderGoban }   from '../goban.js';
+    import {
+      nearestIndex, buildIntersections,
+      extractStonePatches, detectElidedEdges,
+      generateSGF,
+    } from '../photo-pipeline.js';
+    import { runPipeline as sharedRunPipeline } from '../run-pipeline.js';
+
+    // ── Helpers ────────────────────────────────────────────────────────────────
+    function el(id) { return document.getElementById(id); }
+    function setStatus(msg) { el('status').textContent = msg; }
+    function updateLabel(canvasId) {
+      const canvas = el(canvasId);
+      const label = canvas.closest('.stage').querySelector('.stage-label');
+      if (!label._baseText) label._baseText = label.textContent;
+      label.textContent = `${label._baseText} (${canvas.width}×${canvas.height})`;
+    }
+
+    // ── Tesseract.js OCR worker (lazy-initialized) ───────────────────────────
+    let ocrWorker = null;
+    async function getOcrWorker() {
+      if (!ocrWorker) {
+        ocrWorker = await Tesseract.createWorker('eng');
+        await ocrWorker.setParameters({
+          tessedit_char_whitelist: '0123456789',
+          tessedit_pageseg_mode: Tesseract.PSM.SINGLE_WORD,
+        });
+      }
+      return ocrWorker;
+    }
+
+    async function detectDigitsOnStones(patches) {
+      if (patches.length === 0) return new Map();
+      const worker = await getOcrWorker();
+      const digitMap = new Map();
+      const tmpCanvas = document.createElement('canvas');
+      const tmpCtx = tmpCanvas.getContext('2d');
+
+      for (const { index, imageData } of patches) {
+        const { data, width, height } = imageData;
+        tmpCanvas.width = width;
+        tmpCanvas.height = height;
+        const imgData = new ImageData(data, width, height);
+        tmpCtx.putImageData(imgData, 0, 0);
+
+        const { data: { text, confidence } } = await worker.recognize(tmpCanvas);
+        const cleaned = text.trim();
+        if (!cleaned) continue;
+        const number = parseInt(cleaned, 10);
+        if (isNaN(number) || number <= 0) continue;
+        if (confidence < 50) continue;
+        digitMap.set(index, { number, confidence });
+      }
+      return digitMap;
+    }
+
+    const canvasInput = el('canvas-input');
+    const ctxInput    = canvasInput.getContext('2d');
+    let imageLoaded   = false;
+    let videoStream   = null;
+
+    // ── Slider labels + localStorage persistence ───────────────────────────────
+    const LS_PREFIX   = 'kifu-proto-';
+    const SLIDER_IDS  = ['canny-lo', 'canny-hi'];
+    const SELECT_IDS  = ['board-size'];
+    const CHECK_IDS   = ['show-patches', 'read-digits'];
+
+    for (const id of SLIDER_IDS) {
+      const saved = localStorage.getItem(LS_PREFIX + id);
+      if (saved !== null) { el(id).value = saved; }
+      const label = el(id + '-val');
+      label.textContent = el(id).value;
+      el(id).addEventListener('input', () => {
+        label.textContent = el(id).value;
+        localStorage.setItem(LS_PREFIX + id, el(id).value);
+        schedulePipeline();
+      });
+    }
+    for (const id of SELECT_IDS) {
+      const saved = localStorage.getItem(LS_PREFIX + id);
+      if (saved !== null) { el(id).value = saved; }
+      el(id).addEventListener('change', () => {
+        localStorage.setItem(LS_PREFIX + id, el(id).value);
+        schedulePipeline(false);
+      });
+    }
+    for (const id of CHECK_IDS) {
+      const saved = localStorage.getItem(LS_PREFIX + id);
+      if (saved !== null) el(id).checked = saved === '1';
+      el(id).addEventListener('change', () => {
+        localStorage.setItem(LS_PREFIX + id, el(id).checked ? '1' : '0');
+        schedulePipeline(false);
+      });
+    }
+
+    // ── Load image into input canvas ───────────────────────────────────────────
+    function loadSource(source) {
+      const maxW = 4032, maxH = 4032;
+      let w = source.videoWidth  || source.naturalWidth  || source.width;
+      let h = source.videoHeight || source.naturalHeight || source.height;
+      const scale = Math.min(1, maxW / w, maxH / h);
+      w = Math.round(w * scale);
+      h = Math.round(h * scale);
+      canvasInput.width  = w;
+      canvasInput.height = h;
+      ctxInput.drawImage(source, 0, 0, w, h);
+      updateLabel('canvas-input');
+      imageLoaded   = true;
+      lastDetection = null;
+      el('process-btn').disabled = false;
+      el('use-full-btn').disabled = false;
+      setStatus('Image loaded.');
+      runPipeline(false);
+    }
+
+    // ── Paste ──────────────────────────────────────────────────────────────────
+    el('paste-btn').addEventListener('click', () => {
+      navigator.clipboard.read().then(items => {
+        for (const item of items) {
+          const type = item.types.find(t => t.startsWith('image/'));
+          if (type) {
+            item.getType(type).then(blob => blobToCanvas(blob));
+            return;
+          }
+        }
+        setStatus('No image on clipboard.');
+      }).catch(() => setStatus('Clipboard access denied.'));
+    });
+
+    document.addEventListener('paste', e => {
+      const item = [...e.clipboardData.items].find(i => i.type.startsWith('image/'));
+      if (item) blobToCanvas(item.getAsFile());
+    });
+
+    function blobToCanvas(blob) {
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => { loadSource(img); URL.revokeObjectURL(url); };
+      img.src = url;
+    }
+
+    // ── File picker ────────────────────────────────────────────────────────────
+    el('file-input').addEventListener('change', e => {
+      if (e.target.files[0]) blobToCanvas(e.target.files[0]);
+    });
+
+    // ── Drag and drop (whole window) ───────────────────────────────────────────
+    document.addEventListener('dragover', e => { e.preventDefault(); });
+    document.addEventListener('drop', e => {
+      e.preventDefault();
+      const file = [...e.dataTransfer.items || []]
+        .find(i => i.kind === 'file' && i.type.startsWith('image/'))
+        ?.getAsFile()
+        ?? [...e.dataTransfer.files].find(f => f.type.startsWith('image/'));
+      if (file) blobToCanvas(file);
+    });
+
+    // ── Camera ────────────────────────────────────────────────────────────────
+    const videoEl  = el('camera-video');
+    const cameraBtn = el('camera-btn');
+
+    cameraBtn.addEventListener('click', async () => {
+      if (videoStream) {
+        loadSource(videoEl);
+        stopCamera();
+      } else {
+        try {
+          videoStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: 'environment' } }
+          });
+          videoEl.srcObject = videoStream;
+          await videoEl.play();
+          cameraBtn.textContent = 'Capture ■';
+          setStatus('Camera live — click "Capture ■" to grab frame.');
+        } catch (err) {
+          setStatus('Camera error: ' + err.message);
+        }
+      }
+    });
+
+    function stopCamera() {
+      if (videoStream) {
+        videoStream.getTracks().forEach(t => t.stop());
+        videoStream = null;
+      }
+      cameraBtn.textContent = 'Camera';
+    }
+
+    // ── State ──────────────────────────────────────────────────────────────────
+    let lastDetection    = null;
+    let lastStones       = null;
+    let lastDbgInfo      = null;
+    let lastGrayCache    = null;
+    let lastHoveredStone = null;
+    let lastDewarpedGray = null; // cloned cv.Mat for OCR
+
+    // ── Process ────────────────────────────────────────────────────────────────
+    el('process-btn').addEventListener('click',  () => runPipeline(false));
+    el('use-full-btn').addEventListener('click', () => runPipeline(true));
+
+    let pipeTimer = null;
+    function schedulePipeline() {
+      if (!imageLoaded) return;
+      clearTimeout(pipeTimer);
+      pipeTimer = setTimeout(() => runPipeline(false), 350);
+    }
+
+    async function runPipeline(fullImage) {
+      if (!imageLoaded) return;
+
+      const cannyLo  = +el('canny-lo').value;
+      const cannyHi  = +el('canny-hi').value;
+      const hintN    = +el('board-size').value; // 0 = Auto
+
+      const toDelete = [];
+      const mat = m => { toDelete.push(m); return m; };
+
+      // Free previous dewarpedGray clone
+      if (lastDewarpedGray) { try { lastDewarpedGray.delete(); } catch {} lastDewarpedGray = null; }
+
+      const stages = [];
+      const onStage = (name, ms) => stages.push({ name, ms });
+
+      try {
+        const src     = mat(cv.imread(canvasInput));
+        const grayMat = mat(new cv.Mat());
+        cv.cvtColor(src, grayMat, cv.COLOR_RGBA2GRAY);
+
+        const onIntermediate = (name, data) => {
+          if (name === 'boardDetection' && data.edges) {
+            cv.imshow(el('canvas-edges'), data.edges);
+            updateLabel('canvas-edges');
+          }
+          if (name === 'rectification' && data.rectified) {
+            cv.imshow(el('canvas-rectified'), data.rectified);
+            updateLabel('canvas-rectified');
+          }
+          if (name === 'enhanceGray' && data.enhanced) {
+            cv.imshow(el('canvas-enhanced'), data.enhanced);
+            updateLabel('canvas-enhanced');
+          }
+          if (name === 'detectGrid') {
+            drawDetect1Features(data.detection);
+            drawDetect1Grid(data.detection);
+            drawCircleChart(data.detection);
+          }
+          if (name === 'tpsFit' && data.dewarped) {
+            cv.imshow(el('canvas-dewarped'), data.dewarped);
+            updateLabel('canvas-dewarped');
+          }
+          if (name === 'reDetection' && data.dewarpedGray) {
+            lastDewarpedGray = data.dewarpedGray.clone();
+          }
+          if (name === 'classification') {
+            lastStones    = data.classResult.stones;
+            lastDbgInfo   = data.classResult.dbgInfo;
+            lastGrayCache = data.classResult.grayCache;
+            lastDetection = data.finalDetection;
+          }
+        };
+
+        const result = sharedRunPipeline(
+          { colorMat: src, grayMat, width: src.cols, height: src.rows },
+          { cannyLo, cannyHi, hintN, onStage, onIntermediate });
+
+        if (!result) {
+          setStatus('Grid detection failed — try adjusting Canny or board size.');
+          drawTiming(stages);
+          return;
+        }
+
+        // Reflect auto-detected board size in selector
+        if (hintN === 0) {
+          el('board-size').value = String(result.nRows);
+        }
+
+        // Draw stones overlay on dewarped canvas
+        const { classResult, finalDetection } = result;
+        const stones = classResult.stones;
+        drawStonesOverlay(stones, finalDetection.step, lastDbgInfo);
+        updateLabel('canvas-stones');
+
+        // ── Digit detection on stones (Tesseract OCR) ──────────────────────
+        let digitMap = null;
+        if (el('read-digits').checked && lastDewarpedGray) {
+          const patches = extractStonePatches(lastDewarpedGray, stones, finalDetection.step);
+          if (patches.length > 0) {
+            digitMap = await detectDigitsOnStones(patches);
+
+            // Dedup: find numbers claimed by multiple stones, keep highest confidence
+            const BLUR_RADII = [1, 2, 3];
+            for (const blurRadius of BLUR_RADII) {
+              const byNumber = new Map();
+              for (const [idx, d] of digitMap) {
+                const arr = byNumber.get(d.number) || [];
+                arr.push({ index: idx, confidence: d.confidence });
+                byNumber.set(d.number, arr);
+              }
+              const redetectIndices = [];
+              for (const [, entries] of byNumber) {
+                if (entries.length <= 1) continue;
+                entries.sort((a, b) => b.confidence - a.confidence);
+                for (let k = 1; k < entries.length; k++) {
+                  redetectIndices.push(entries[k].index);
+                  digitMap.delete(entries[k].index);
+                }
+              }
+              if (redetectIndices.length === 0) break;
+
+              console.log(`[digits] dedup pass blur=${blurRadius}: re-detecting stones ${JSON.stringify(redetectIndices)}`);
+              const rePatches = extractStonePatches(
+                lastDewarpedGray, stones, finalDetection.step,
+                { indices: redetectIndices, blurRadius });
+              const reResults = await detectDigitsOnStones(rePatches);
+              for (const [idx, d] of reResults) digitMap.set(idx, d);
+            }
+
+            // Gap recovery
+            if (digitMap.size >= 2) {
+              const assignedNumbers = new Set([...digitMap.values()].map(d => d.number));
+              const assignedIndices = new Set(digitMap.keys());
+              const minN = Math.min(...assignedNumbers);
+              const maxN = Math.max(...assignedNumbers);
+              const missing = [];
+              for (let n = minN; n <= maxN; n++) {
+                if (!assignedNumbers.has(n)) missing.push(n);
+              }
+              if (missing.length > 0 && missing.length <= maxN - minN) {
+                const candidateIndices = [];
+                for (let i = 0; i < stones.length; i++) {
+                  if (assignedIndices.has(i)) continue;
+                  const s = stones[i];
+                  if (s._isStone || s.color === 'B' || s.color === 'W') candidateIndices.push(i);
+                }
+                if (candidateIndices.length > 0) {
+                  console.log(`[digits] gap recovery: missing ${JSON.stringify(missing)}, trying ${candidateIndices.length} unassigned stones`);
+                  for (const blurRadius of [0, 1, 2, 3]) {
+                    const rePatches = extractStonePatches(
+                      lastDewarpedGray, stones, finalDetection.step,
+                      { indices: candidateIndices, blurRadius });
+                    const reResults = await detectDigitsOnStones(rePatches);
+                    for (const [idx, d] of reResults) {
+                      if (missing.includes(d.number) && !assignedNumbers.has(d.number)) {
+                        digitMap.set(idx, d);
+                        assignedNumbers.add(d.number);
+                        assignedIndices.add(idx);
+                        const ci = candidateIndices.indexOf(idx);
+                        if (ci >= 0) candidateIndices.splice(ci, 1);
+                      }
+                    }
+                    if (missing.every(n => assignedNumbers.has(n))) break;
+                  }
+                }
+              }
+            }
+
+            if (digitMap.size > 0) {
+              console.log('Detected digits:', JSON.stringify([...digitMap.entries()].map(
+                ([i, d]) => ({ stone: i, r: stones[i].r, c: stones[i].c, ...d })
+              )));
+              drawDigitOverlay(stones, digitMap, finalDetection.step);
+            }
+          }
+        }
+
+        // ── Elided edge detection ────────────────────────────────────────────
+        let elidedEdges = null;
+        if (lastDewarpedGray) {
+          elidedEdges = detectElidedEdges(lastDewarpedGray, finalDetection, stones);
+          const elidedNames = ['top','bottom','left','right'].filter(e => elidedEdges[e]);
+          const elidedText = elidedNames.length
+            ? 'Elided: ' + elidedNames.join(', ')
+            : 'No elided edges';
+          console.log('Elided edges:', JSON.stringify(elidedEdges));
+          setStatus(elidedText);
+        }
+
+        // SGF output
+        const sgf = generateSGF(stones, result.nRows, elidedEdges, result.nCols,
+                                digitMap?.size ? digitMap : undefined);
+        el('sgf-out').textContent = sgf;
+        el('sgf-wrap').hidden = false;
+        renderBoard(sgf);
+        stages.push({ name: 'render', ms: 0 });
+
+      } catch (err) {
+        setStatus('Error: ' + err.message);
+        console.error(err);
+      } finally {
+        toDelete.forEach(m => { try { m.delete(); } catch {} });
+        drawTiming(stages);
+      }
+    }
+
+    // ── Timing diagram ────────────────────────────────────────────────────────
+    function drawTiming(stages) {
+      if (!stages.length) return;
+
+      const PAD     = 6;
+      const ROW_H   = 16;
+      const LABEL_W = 92;
+      const VAL_W   = 46;
+      const TOTAL_W = 420;
+      const BAR_W   = TOTAL_W - LABEL_W - VAL_W - PAD * 3;
+      const H       = stages.length * (ROW_H + PAD) + PAD + ROW_H + PAD;
+
+      const canvas = el('timing-canvas');
+      canvas.width  = TOTAL_W;
+      canvas.height = H;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, TOTAL_W, H);
+
+      const maxDur = Math.max(...stages.map(s => s.ms), 1);
+      const color = i => `hsl(${Math.round(i * 360 / stages.length)},45%,45%)`;
+
+      ctx.font         = '11px monospace';
+      ctx.textBaseline = 'middle';
+
+      stages.forEach(({ name, ms }, i) => {
+        const y   = PAD + i * (ROW_H + PAD);
+        const mid = y + ROW_H / 2;
+
+        ctx.fillStyle = '#888';
+        ctx.textAlign = 'right';
+        ctx.fillText(name, LABEL_W, mid);
+
+        const barLen = Math.max(1, (ms / maxDur) * BAR_W);
+        ctx.fillStyle = color(i);
+        ctx.fillRect(LABEL_W + PAD, y + 1, barLen, ROW_H - 2);
+
+        ctx.fillStyle = '#bbb';
+        ctx.textAlign = 'left';
+        ctx.fillText(ms.toFixed(0) + 'ms', LABEL_W + PAD + BAR_W + PAD, mid);
+      });
+
+      // Total row
+      const totalY = H - PAD - ROW_H;
+      const total  = stages.reduce((s, st) => s + st.ms, 0);
+      ctx.fillStyle = '#555';
+      ctx.textAlign = 'right';
+      ctx.fillText('total', LABEL_W, totalY + ROW_H / 2);
+      ctx.fillStyle = '#eee';
+      ctx.textAlign = 'left';
+      ctx.fillText(total.toFixed(0) + 'ms', LABEL_W + PAD + BAR_W + PAD, totalY + ROW_H / 2);
+
+      el('timing-wrap').style.display = '';
+    }
+
+    // ── Detection1 feature overlay: Harris corners + circles ──────────────
+    function drawDetect1Features(detection) {
+      const src = el('canvas-rectified');
+      const dst = el('canvas-d1-features');
+      dst.width  = src.width;
+      dst.height = src.height;
+      const ctx = dst.getContext('2d');
+      ctx.drawImage(src, 0, 0);
+      updateLabel('canvas-d1-features');
+
+      const { rawCircles, harrisCorners, houghLines } = detection;
+
+      // HoughLines
+      if (houghLines && houghLines.length > 0) {
+        ctx.lineWidth = 0.5;
+        for (const hl of houghLines) {
+          ctx.strokeStyle = hl.axis === 'row'
+            ? 'rgba(255,140,0,0.4)' : 'rgba(255,80,200,0.4)';
+          const cosT = Math.cos(hl.theta), sinT = Math.sin(hl.theta);
+          const x0 = cosT * hl.rho, y0 = sinT * hl.rho;
+          const dx = -sinT, dy = cosT;
+          const len = Math.max(dst.width, dst.height);
+          ctx.beginPath();
+          ctx.moveTo(x0 - dx * len, y0 - dy * len);
+          ctx.lineTo(x0 + dx * len, y0 + dy * len);
+          ctx.stroke();
+        }
+      }
+
+      // Hough centroids
+      const { houghRowCentroids, houghColCentroids } = detection;
+      if (houghRowCentroids) {
+        ctx.strokeStyle = 'rgba(255,60,0,0.9)';
+        ctx.lineWidth = 2;
+        const tickW = 12;
+        for (const c of houghRowCentroids) {
+          ctx.beginPath();
+          ctx.moveTo(0, c.pos); ctx.lineTo(tickW, c.pos);
+          ctx.moveTo(dst.width - tickW, c.pos); ctx.lineTo(dst.width, c.pos);
+          ctx.stroke();
+        }
+      }
+      if (houghColCentroids) {
+        ctx.strokeStyle = 'rgba(255,0,200,0.9)';
+        ctx.lineWidth = 2;
+        const tickH = 12;
+        for (const c of houghColCentroids) {
+          ctx.beginPath();
+          ctx.moveTo(c.pos, 0); ctx.lineTo(c.pos, tickH);
+          ctx.moveTo(c.pos, dst.height - tickH); ctx.lineTo(c.pos, dst.height);
+          ctx.stroke();
+        }
+      }
+
+      // Harris corners
+      ctx.fillStyle = 'rgba(0,220,80,0.5)';
+      for (const p of harrisCorners) {
+        ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, 2 * Math.PI); ctx.fill();
+      }
+
+      // Detected circles
+      ctx.strokeStyle = 'rgba(0,220,180,0.7)';
+      ctx.lineWidth = 1.5;
+      for (const c of rawCircles) {
+        ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, 2 * Math.PI); ctx.stroke();
+      }
+    }
+
+    // ── Detection1 grid overlay: fitted lines + extent rect ─────────────
+    function drawDetect1Grid(detection) {
+      const src = el('canvas-rectified');
+      const dst = el('canvas-d1-grid');
+      dst.width  = src.width;
+      dst.height = src.height;
+      const ctx = dst.getContext('2d');
+      ctx.drawImage(src, 0, 0);
+      updateLabel('canvas-d1-grid');
+
+      const { intersections, uniformRowPos, uniformColPos, gridAngle } = detection;
+      const nR = intersections.length, nC = intersections[0].length;
+
+      // Fitted grid lines — yellow
+      ctx.strokeStyle = 'rgba(255,220,0,0.75)';
+      ctx.lineWidth = 1;
+      for (let r = 0; r < nR; r++) {
+        ctx.beginPath();
+        ctx.moveTo(intersections[r][0].x, intersections[r][0].y);
+        ctx.lineTo(intersections[r][nC-1].x, intersections[r][nC-1].y);
+        ctx.stroke();
+      }
+      for (let c = 0; c < nC; c++) {
+        ctx.beginPath();
+        ctx.moveTo(intersections[0][c].x, intersections[0][c].y);
+        ctx.lineTo(intersections[nR-1][c].x, intersections[nR-1][c].y);
+        ctx.stroke();
+      }
+
+      // Grid extent — bright green quad
+      const W = dst.width, H = dst.height;
+      const uInter = buildIntersections(uniformRowPos, uniformColPos, gridAngle, W, H);
+      const uNR = uInter.length, uNC = uInter[0].length;
+      const corners = [
+        uInter[0][0], uInter[0][uNC-1],
+        uInter[uNR-1][uNC-1], uInter[uNR-1][0],
+      ];
+      ctx.strokeStyle = 'rgba(0,255,80,0.8)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(corners[0].x, corners[0].y);
+      for (let i = 1; i < corners.length; i++) ctx.lineTo(corners[i].x, corners[i].y);
+      ctx.closePath();
+      ctx.stroke();
+    }
+
+    // ── Circle diameter distribution chart ───────────────────────────────
+    function drawCircleChart(detection) {
+      const { rawCircles, circleMinR, circleMaxR, medRadius } = detection;
+      const CW = 320, CH = 160;
+      const canvas = el('canvas-circles');
+      canvas.width = CW;
+      canvas.height = CH;
+      updateLabel('canvas-circles');
+
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#1a1a1a';
+      ctx.fillRect(0, 0, CW, CH);
+
+      if (rawCircles.length === 0) {
+        ctx.fillStyle = '#666';
+        ctx.font = '11px monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText('no circles detected', 10, CH / 2);
+        return;
+      }
+
+      const diameters = rawCircles.map(c => 2 * c.r);
+      const dMax = Math.max(2 * circleMaxR * 1.3, Math.max(...diameters) * 1.1);
+      const BIN = 2;
+      const nBins = Math.ceil(dMax / BIN);
+      const bins = new Array(nBins).fill(0);
+      for (const d of diameters) bins[Math.min(Math.floor(d / BIN), nBins - 1)]++;
+      const maxCount = Math.max(...bins, 1);
+
+      const PAD = { left: 28, right: 8, top: 18, bottom: 22 };
+      const chartW = CW - PAD.left - PAD.right;
+      const chartH = CH - PAD.top - PAD.bottom;
+      const xFor = d => PAD.left + (d / dMax) * chartW;
+
+      // Accepted range background
+      ctx.fillStyle = 'rgba(0,180,100,0.12)';
+      ctx.fillRect(xFor(2 * circleMinR), PAD.top, xFor(2 * circleMaxR) - xFor(2 * circleMinR), chartH);
+
+      // Bars
+      const barW = Math.max(1, chartW / nBins - 0.5);
+      for (let i = 0; i < nBins; i++) {
+        if (bins[i] === 0) continue;
+        const h = (bins[i] / maxCount) * chartH;
+        ctx.fillStyle = 'rgba(0,200,180,0.85)';
+        ctx.fillRect(xFor(i * BIN), PAD.top + chartH - h, barW, h);
+      }
+
+      // Median diameter line
+      if (medRadius != null) {
+        ctx.strokeStyle = 'rgba(255,200,0,0.9)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        const xm = xFor(2 * medRadius);
+        ctx.moveTo(xm, PAD.top); ctx.lineTo(xm, PAD.top + chartH);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      // X axis
+      ctx.strokeStyle = '#444';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(PAD.left, PAD.top + chartH);
+      ctx.lineTo(PAD.left + chartW, PAD.top + chartH);
+      ctx.stroke();
+
+      ctx.fillStyle = '#666';
+      ctx.font = '9px monospace';
+      ctx.textAlign = 'center';
+      const tickStep = dMax <= 80 ? 10 : 20;
+      for (let d = 0; d <= dMax; d += tickStep) {
+        const x = xFor(d);
+        ctx.fillText(d, x, CH - 5);
+        ctx.beginPath(); ctx.moveTo(x, PAD.top + chartH); ctx.lineTo(x, PAD.top + chartH + 3); ctx.stroke();
+      }
+
+      // Stats header
+      const medStr = medRadius != null ? `med⌀=${(2 * medRadius).toFixed(0)}` : 'no median';
+      ctx.fillStyle = '#999';
+      ctx.font = '9px monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(
+        `n=${rawCircles.length}  ${medStr}  accepted⌀=[${(2*circleMinR).toFixed(0)}..${(2*circleMaxR).toFixed(0)}]px`,
+        PAD.left, PAD.top - 4
+      );
+    }
+
+    // ── Stones overlay on dewarped canvas ───────────────────────────────────────
+    function drawStonesOverlay(stones, step, dbgInfo) {
+      const canvas = el('canvas-stones');
+      const src = el('canvas-dewarped');
+      canvas.width  = src.width;
+      canvas.height = src.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(src, 0, 0);
+
+      // Optional: classifier sampling zones
+      if (el('show-patches').checked && dbgInfo) {
+        const { ringIn, ringOut, bodyAnnIn, bodyAnnOut } = dbgInfo;
+        ctx.lineWidth = 1;
+        for (const s of stones) {
+          ctx.strokeStyle = s._isStone ? 'rgba(80,230,80,0.7)' : 'rgba(230,80,80,0.7)';
+          ctx.beginPath(); ctx.arc(s.cx, s.cy, ringOut, 0, 2 * Math.PI); ctx.stroke();
+          ctx.beginPath(); ctx.arc(s.cx, s.cy, ringIn,  0, 2 * Math.PI); ctx.stroke();
+          if (s._isStone) {
+            ctx.strokeStyle = s.color === 'B' ? 'rgba(80,150,255,0.8)' : 'rgba(255,210,60,0.8)';
+            ctx.beginPath(); ctx.arc(s.cx, s.cy, bodyAnnOut, 0, 2 * Math.PI); ctx.stroke();
+            ctx.beginPath(); ctx.arc(s.cx, s.cy, bodyAnnIn,  0, 2 * Math.PI); ctx.stroke();
+          }
+        }
+      }
+
+      const r = Math.max(3, Math.floor(step * 0.38));
+      ctx.lineWidth = 1.5;
+      for (const s of stones) {
+        if (s.color === '.') continue;
+        ctx.beginPath();
+        ctx.arc(s.cx, s.cy, r, 0, 2 * Math.PI);
+        if (s.color === 'B') {
+          ctx.fillStyle   = 'rgba(10,10,10,0.75)';
+          ctx.strokeStyle = 'rgba(200,200,200,0.9)';
+        } else {
+          ctx.fillStyle   = 'rgba(245,245,245,0.75)';
+          ctx.strokeStyle = 'rgba(30,30,30,0.9)';
+        }
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+
+    // ── Digit overlay on stones canvas ────────────────────────────────────────
+    function drawDigitOverlay(stones, digitMap, step) {
+      const canvas = el('canvas-stones');
+      const ctx = canvas.getContext('2d');
+      const fontSize = Math.max(10, Math.round(step * 0.4));
+      ctx.font = `bold ${fontSize}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+
+      for (const [i, { number }] of digitMap) {
+        const s = stones[i];
+        ctx.fillStyle = s._body < 128 ? '#0f0' : '#f00';
+        ctx.strokeStyle = s._body < 128 ? '#000' : '#fff';
+        ctx.lineWidth = 2;
+        ctx.strokeText(String(number), s.cx, s.cy);
+        ctx.fillText(String(number), s.cx, s.cy);
+      }
+    }
+
+    // ── Board preview ──────────────────────────────────────────────────────────
+    function renderBoard(sgf) {
+      const preview = el('board-preview');
+      preview.innerHTML = '';
+      const w = el('canvas-stones').offsetWidth;
+      if (w > 0) preview.style.width = w + 'px';
+
+      // Show rectified and dewarped thumbnails
+      const thumb = el('rect-thumb');
+      thumb.src = el('canvas-rectified').toDataURL();
+      thumb.style.width  = w > 0 ? w + 'px' : '';
+      thumb.style.height = w > 0 ? w + 'px' : '';
+      thumb.hidden = false;
+
+      const dewarpThumb = el('dewarped-thumb');
+      dewarpThumb.src = el('canvas-dewarped').toDataURL();
+      dewarpThumb.style.width  = w > 0 ? w + 'px' : '';
+      dewarpThumb.style.height = w > 0 ? w + 'px' : '';
+      dewarpThumb.hidden = false;
+
+      try {
+        const trees = parse(sgf);
+        renderGoban(trees, preview);
+      } catch {}
+    }
+
+    // ── Copy SGF ───────────────────────────────────────────────────────────────
+    el('copy-sgf').addEventListener('click', () => {
+      const sgf = el('sgf-out').textContent;
+      navigator.clipboard.writeText(sgf).then(() => {
+        el('copy-sgf').textContent = 'Copied!';
+        setTimeout(() => { el('copy-sgf').textContent = 'Copy'; }, 2000);
+      });
+    });
+
+    // ── Open in kifu ───────────────────────────────────────────────────────────
+    el('open-main').addEventListener('click', async () => {
+      const sgf = el('sgf-out').textContent;
+      if (!sgf) return;
+      const fragment = await encodeSGF(sgf);
+      window.open('./index.html#' + fragment, '_blank');
+    });
+
+    // ── Hover debug panel ──────────────────────────────────────────────────────
+    el('canvas-stones').addEventListener('mousemove', e => {
+      if (!lastStones || !lastDetection || !lastDbgInfo) return;
+      const canvas = el('canvas-stones');
+      const rect   = canvas.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) * (canvas.width  / rect.width);
+      const my = (e.clientY - rect.top)  * (canvas.height / rect.height);
+
+      const { rowPos, colPos, step, intersections } = lastDetection;
+      const ri = nearestIndex(rowPos, my);
+      const ci = nearestIndex(colPos, mx);
+      const ipt = intersections[ri][ci];
+      if (Math.hypot(ipt.x - mx, ipt.y - my) > step * 0.5) {
+        el('debug-panel').style.display = 'none';
+        return;
+      }
+
+      const s = lastStones[ri * colPos.length + ci];
+      if (!s) { el('debug-panel').style.display = 'none'; return; }
+      lastHoveredStone = s;
+
+      const { stoneRPCent, emptyRPCent, rpThresh,
+              bCent, wCent, stoneR, bodyAnnIn, bodyAnnOut,
+              ringIn, ringOut } = lastDbgInfo;
+      const fmt  = v => String(Math.round(v)).padStart(5);
+      const fmtf = v => v.toFixed(3).padStart(6);
+      const flbl = c => ({ 'B': 'B', 'W': 'W', '.': 'E' }[c] ?? c);
+
+      el('debug-content').textContent =
+        `r=${s.r} c=${s.c}  cx=${Math.round(s.cx)} cy=${Math.round(s.cy)}\n` +
+        `${'─'.repeat(30)}\n` +
+        `step  ${fmt(step)}  stoneR${fmt(stoneR)}\n` +
+        `ringIn${fmt(ringIn)}  ringOut${fmt(ringOut)}\n` +
+        `body  [${Math.round(bodyAnnIn)}, ${Math.round(bodyAnnOut)}] annulus\n` +
+        `${'─'.repeat(30)}\n` +
+        `radPow ${fmtf(s._rp)}  (Stage 1)\n` +
+        `body   ${fmt(s._body)}       (Stage 2)\n` +
+        `${'─'.repeat(30)}\n` +
+        `stone ${s._isStone ? 'yes' : 'no '}${s._circle ? ' +circle' : ''}   final ${flbl(s.color)}\n` +
+        `${'─'.repeat(30)}\n` +
+        `Stage 1 centroids:\n` +
+        `  stone rp=${fmtf(stoneRPCent)}\n` +
+        `  empty rp=${fmtf(emptyRPCent)}\n` +
+        `  thresh  =${fmtf(rpThresh)}\n` +
+        `Stage 2 centroids (stones only):\n` +
+        `  B body=${fmt(bCent)}\n` +
+        `  W body=${fmt(wCent)}`;
+
+      // Crops
+      const DISP = 96;
+      const hw   = Math.round(step * 0.7);
+      const src  = el('canvas-dewarped');
+      const sx   = s.cx - hw, sy = s.cy - hw, sw = hw * 2, sh = hw * 2;
+      const scale = DISP / sw;
+
+      const rawC = el('debug-crop-raw');
+      rawC.width = rawC.height = DISP;
+      rawC.style.width = rawC.style.height = DISP + 'px';
+      rawC.getContext('2d').drawImage(src, sx, sy, sw, sh, 0, 0, DISP, DISP);
+
+      const ringC = el('debug-crop-ring');
+      ringC.width = ringC.height = DISP;
+      ringC.style.width = ringC.style.height = DISP + 'px';
+      const rctx = ringC.getContext('2d');
+      rctx.drawImage(src, sx, sy, sw, sh, 0, 0, DISP, DISP);
+      const cx2 = DISP / 2, cy2 = DISP / 2;
+      rctx.strokeStyle = 'rgba(255,160,0,0.9)'; rctx.lineWidth = 1;
+      rctx.beginPath(); rctx.arc(cx2, cy2, bodyAnnIn  * scale, 0, 2*Math.PI); rctx.stroke();
+      rctx.beginPath(); rctx.arc(cx2, cy2, bodyAnnOut * scale, 0, 2*Math.PI); rctx.stroke();
+      rctx.strokeStyle = '#0f0'; rctx.lineWidth = 1.5;
+      rctx.beginPath(); rctx.arc(cx2, cy2, stoneR * scale, 0, 2*Math.PI); rctx.stroke();
+      rctx.strokeStyle = 'rgba(0,200,255,0.8)'; rctx.lineWidth = 1;
+      rctx.beginPath(); rctx.arc(cx2, cy2, ringIn  * scale, 0, 2*Math.PI); rctx.stroke();
+      rctx.beginPath(); rctx.arc(cx2, cy2, ringOut * scale, 0, 2*Math.PI); rctx.stroke();
+
+      // Position panel
+      const panel = el('debug-panel');
+      panel.style.display = '';
+      const pw = panel.offsetWidth, ph = panel.offsetHeight;
+      let px = e.clientX + 18, py = e.clientY + 18;
+      if (px + pw > window.innerWidth)  px = e.clientX - pw - 10;
+      if (py + ph > window.innerHeight) py = e.clientY - ph - 10;
+      panel.style.left = px + 'px';
+      panel.style.top  = py + 'px';
+    });
+
+    el('canvas-stones').addEventListener('mouseleave', () => {
+      el('debug-panel').style.display = 'none';
+    });
+
+    el('canvas-stones').addEventListener('click', () => {
+      const text = el('debug-content').textContent;
+      if (!text) return;
+
+      let payload = text;
+      const s = lastHoveredStone;
+      if (s && lastGrayCache && lastDbgInfo) {
+        const { W, H, data } = lastGrayCache;
+        const { stoneR, bodyAnnIn, bodyAnnOut, ringIn, ringOut, step } = lastDbgInfo;
+        const hw = Math.round(step * 0.7);
+        const cx = Math.round(s.cx), cy = Math.round(s.cy);
+        const rows = [];
+        for (let dy = -hw; dy < hw; dy++) {
+          const row = [];
+          for (let dx = -hw; dx < hw; dx++) {
+            const px = cx + dx, py = cy + dy;
+            row.push((px >= 0 && px < W && py >= 0 && py < H) ? data[py * W + px] : 0);
+          }
+          rows.push(row);
+        }
+        const meta = { r: s.r, c: s.c, cx, cy, step, stoneR, bodyAnnIn, bodyAnnOut, ringIn, ringOut, hw };
+        payload += '\n\nPATCH\n' + JSON.stringify({ ...meta, gray: rows });
+      }
+
+      navigator.clipboard.writeText(payload).then(() => {
+        const p = el('debug-panel');
+        const prev = p.style.outline;
+        p.style.outline = '1px solid #7d7';
+        setTimeout(() => { p.style.outline = prev; }, 600);
+      });
+    });
+
+    async function encodeSGF(sgf) {
+      const bytes  = new TextEncoder().encode(sgf);
+      const cs     = new CompressionStream('gzip');
+      const writer = cs.writable.getWriter();
+      writer.write(bytes);
+      writer.close();
+      const buf = await new Response(cs.readable).arrayBuffer();
+      return btoa(String.fromCharCode(...new Uint8Array(buf)))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    }
+  </script>
+</body>
+</html>

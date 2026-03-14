@@ -1,6 +1,15 @@
 {
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "test:unit": "node --test photo-pipeline.test.js",
+    "test:e2e": "node --test photo-pipeline-e2e.test.js",
+    "generate-fixtures": "node generate-fixtures.js",
+    "ablation": "node photo-pipeline-ablation.js",
+    "ablation:report": "node ablation-report.js"
+  },
+  "devDependencies": {
+    "opencv-wasm": "4.3.0-10",
+    "sharp": "^0.33.0"
   }
 }
