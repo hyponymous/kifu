@@ -31,6 +31,7 @@
 
     <div id="construct-entry">
       <button id="construct-btn">Edit position</button>
+      <button id="photo-btn">From photo</button>
     </div>
 
     <div id="construct-toolbar" hidden>
@@ -61,6 +62,7 @@
 
     <div id="game-info" class="game-info" hidden></div>
 
+    <canvas id="photo-canvas" hidden></canvas>
     <div id="board"></div>
   </main>
 
@@ -73,12 +75,36 @@
     </div>
   </div>
 
+  <div id="photo-modal" hidden>
+    <div id="photo-modal-content">
+      <div id="photo-modal-header">
+        <div id="photo-dims-row" hidden>
+          <label>Rows <input type="number" id="photo-hint-rows" min="2" max="25"></label>
+          <span>×</span>
+          <label>Cols <input type="number" id="photo-hint-cols" min="2" max="25"></label>
+        </div>
+        <p id="photo-status"></p>
+      </div>
+      <div id="photo-modal-body" hidden>
+        <div class="photo-modal-photo">
+          <canvas id="photo-preview"></canvas>
+        </div>
+        <div class="photo-modal-board" id="photo-board-preview"></div>
+      </div>
+      <div id="photo-modal-footer">
+        <button id="photo-accept-btn" hidden>Accept</button>
+        <button id="photo-cancel-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <script src="qrcode.js"></script>
   <script type="module">
     import { encode }           from './encode.js';
     import { decode, download } from './decode.js';
     import { parse }            from './sgf-parser.js';
     import { renderGoban, replayMain } from './goban.js';
+    import { runPipeline }      from './run-pipeline.js';
 
     const board       = document.getElementById('board');
     const gameInfo    = document.getElementById('game-info');
@@ -106,6 +132,226 @@
 
     const constructEntryEl   = document.getElementById('construct-entry');
     const constructToolbarEl = document.getElementById('construct-toolbar');
+
+    // ── Photo pipeline ────────────────────────────────────────────────────────
+
+    let cvReady = null;
+    function loadCV() {
+      if (cvReady) return cvReady;
+      cvReady = new Promise((resolve, reject) => {
+        window.Module = { onRuntimeInitialized: resolve };
+        const s = document.createElement('script');
+        s.src = 'https://docs.opencv.org/4.x/opencv.js';
+        s.async = true;
+        s.onerror = reject;
+        document.head.appendChild(s);
+      });
+      return cvReady;
+    }
+
+    function imageToMats(img) {
+      const canvas = document.getElementById('photo-canvas');
+      canvas.width  = img.naturalWidth  || img.width;
+      canvas.height = img.naturalHeight || img.height;
+      canvas.getContext('2d').drawImage(img, 0, 0);
+      const colorMat = cv.imread(canvas);
+      const grayMat  = new cv.Mat();
+      cv.cvtColor(colorMat, grayMat, cv.COLOR_RGBA2GRAY);
+      return { colorMat, grayMat, width: canvas.width, height: canvas.height };
+    }
+
+    function drawPhotoOverlay(canvas, { intersections, step }, grid, nRows, nCols) {
+      const ctx = canvas.getContext('2d');
+
+      // Grid lines
+      ctx.strokeStyle = 'rgba(0,255,80,0.75)';
+      ctx.lineWidth = 1.5;
+      for (let r = 0; r < nRows; r++) {
+        ctx.beginPath();
+        let started = false;
+        for (let c = 0; c < nCols; c++) {
+          const pt = intersections[r]?.[c];
+          if (!pt) continue;
+          started ? ctx.lineTo(pt.x, pt.y) : ctx.moveTo(pt.x, pt.y);
+          started = true;
+        }
+        ctx.stroke();
+      }
+      for (let c = 0; c < nCols; c++) {
+        ctx.beginPath();
+        let started = false;
+        for (let r = 0; r < nRows; r++) {
+          const pt = intersections[r]?.[c];
+          if (!pt) continue;
+          started ? ctx.lineTo(pt.x, pt.y) : ctx.moveTo(pt.x, pt.y);
+          started = true;
+        }
+        ctx.stroke();
+      }
+
+      // Stone circles
+      const radius = Math.max(3, step * 0.38);
+      for (let r = 0; r < nRows; r++) {
+        for (let c = 0; c < nCols; c++) {
+          const pt = intersections[r]?.[c];
+          const v = grid[r]?.[c];
+          if (!pt || (v !== 'B' && v !== 'W')) continue;
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
+          ctx.fillStyle = v === 'B' ? 'rgba(17,17,17,0.75)' : 'rgba(240,240,240,0.75)';
+          ctx.fill();
+          ctx.strokeStyle = v === 'B' ? 'rgba(255,255,255,0.35)' : '#333';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+      }
+    }
+
+    function photoResultToSGF(result) {
+      const ab = [], aw = [];
+      for (let r = 0; r < result.nRows; r++) {
+        for (let c = 0; c < result.nCols; c++) {
+          const v = result.grid[r][c];
+          if (v !== 'B' && v !== 'W') continue;
+          const coord = String.fromCharCode(97 + c) + String.fromCharCode(97 + r);
+          (v === 'B' ? ab : aw).push(`[${coord}]`);
+        }
+      }
+      const sz = result.nCols === result.nRows ? result.nCols : `${result.nCols}:${result.nRows}`;
+      let p = `SZ[${sz}]`;
+      if (ab.length) p += `AB${ab.join('')}`;
+      if (aw.length) p += `AW${aw.join('')}`;
+      return `(;${p})`;
+    }
+
+    function renderPhotoBoard(result, container) {
+      renderGoban(parse(photoResultToSGF(result)), container, { forceFullBoard: true, jitter: 0 });
+    }
+
+    let lastPhotoFile   = null;
+    let lastPhotoResult = null;
+    let savedOverlay    = null; // { intersections, step } in rectified coords
+    let photoRerunTimer = null;
+
+    const photoModalEl  = document.getElementById('photo-modal');
+    const photoStatusEl = document.getElementById('photo-status');
+    const photoDimsEl   = document.getElementById('photo-dims-row');
+    const photoBodyEl   = document.getElementById('photo-modal-body');
+    const photoAcceptEl = document.getElementById('photo-accept-btn');
+
+    function openPhotoModal() {
+      photoModalEl.hidden  = false;
+      photoStatusEl.hidden = false;
+      if (!lastPhotoResult) {
+        photoDimsEl.hidden  = true;
+        photoBodyEl.hidden  = true;
+        photoAcceptEl.hidden = true;
+      }
+    }
+
+    function closePhotoModal() {
+      photoModalEl.hidden = true;
+    }
+
+    async function processPhoto(file, hintN = 0) {
+      lastPhotoFile = file;
+      openPhotoModal();
+      photoStatusEl.textContent = 'Loading OpenCV\u2026';
+      try {
+        await loadCV();
+        const img = new Image();
+        img.src = URL.createObjectURL(file);
+        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
+        const mats = imageToMats(img);
+        URL.revokeObjectURL(img.src);
+        photoStatusEl.textContent = 'Detecting board\u2026';
+
+        const previewCanvas = document.getElementById('photo-preview');
+        savedOverlay = null;
+
+        const result = runPipeline(mats, {
+          hintN,
+          onStage(name) { photoStatusEl.textContent = name; },
+          onIntermediate(name, data) {
+            if (name === 'rectification') {
+              cv.imshow(previewCanvas, data.rectified);
+            }
+            if (name === 'detectGrid' && data.detection?.intersections) {
+              savedOverlay = {
+                intersections: data.detection.intersections.map(row =>
+                  row.map(pt => ({ x: pt.x, y: pt.y }))
+                ),
+                step: data.detection.step,
+              };
+            }
+          },
+        });
+
+        mats.colorMat.delete();
+        mats.grayMat.delete();
+
+        if (!result) {
+          photoStatusEl.textContent = 'No board detected';
+          return;
+        }
+
+        lastPhotoResult = result;
+        photoStatusEl.textContent = '';
+        photoStatusEl.hidden = true;
+
+        if (savedOverlay) {
+          drawPhotoOverlay(previewCanvas, savedOverlay, result.grid, result.nRows, result.nCols);
+        }
+        renderPhotoBoard(result, document.getElementById('photo-board-preview'));
+
+        document.getElementById('photo-hint-rows').value = result.nRows;
+        document.getElementById('photo-hint-cols').value = result.nCols;
+        photoDimsEl.hidden   = false;
+        photoBodyEl.hidden   = false;
+        photoAcceptEl.hidden = false;
+      } catch (e) {
+        photoStatusEl.textContent = 'Error: ' + e.message;
+        console.error(e);
+      }
+    }
+
+    document.getElementById('photo-btn').addEventListener('click', () => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*';
+      input.onchange = () => { if (input.files[0]) processPhoto(input.files[0]); };
+      input.click();
+    });
+
+    document.addEventListener('paste', e => {
+      const file = [...(e.clipboardData?.files || [])].find(f => f.type.startsWith('image/'));
+      if (file) { e.preventDefault(); processPhoto(file); }
+    });
+
+    function schedulePhotoRerun() {
+      clearTimeout(photoRerunTimer);
+      photoRerunTimer = setTimeout(() => {
+        const rows = parseInt(document.getElementById('photo-hint-rows').value, 10);
+        const cols = parseInt(document.getElementById('photo-hint-cols').value, 10);
+        if (lastPhotoFile && rows >= 2 && cols >= 2) {
+          processPhoto(lastPhotoFile, Math.max(rows, cols));
+        }
+      }, 600);
+    }
+
+    document.getElementById('photo-hint-rows').addEventListener('input', schedulePhotoRerun);
+    document.getElementById('photo-hint-cols').addEventListener('input', schedulePhotoRerun);
+
+    photoAcceptEl.addEventListener('click', () => {
+      closePhotoModal();
+      const sgf = photoResultToSGF(lastPhotoResult);
+      textarea.value = sgf;
+      render(sgf);
+      scheduleHashUpdate(sgf, true);
+    });
+
+    document.getElementById('photo-cancel-btn').addEventListener('click', closePhotoModal);
+    photoModalEl.addEventListener('click', e => { if (e.target === photoModalEl) closePhotoModal(); });
 
     // ── Init / routing ───────────────────────────────────────────────────────
 
@@ -281,7 +527,10 @@
     });
 
     document.addEventListener('keydown', e => {
-      if (e.key === 'Escape' && !qrModal.hidden) qrModal.hidden = true;
+      if (e.key === 'Escape') {
+        if (!qrModal.hidden) qrModal.hidden = true;
+        else if (!photoModalEl.hidden) closePhotoModal();
+      }
     });
 
     // ── File picker ───────────────────────────────────────────────────────────
