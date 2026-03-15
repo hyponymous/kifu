@@ -718,7 +718,9 @@
 
       const userRows = +el('board-rows').value || 0;
       const userCols = +el('board-cols').value || 0;
-      const hintN = Math.max(userRows, userCols) || 19;
+      const forceRows = userRows || 0;
+      const forceCols = userCols || 0;
+      const hintN = Math.max(forceRows, forceCols) || 19;
       const toDelete = [];
       const mat = m => { toDelete.push(m); return m; };
 
@@ -763,7 +765,7 @@
           cv.cvtColor(src, grayMat, cv.COLOR_RGBA2GRAY);
           pipeResult = sharedRunPipeline(
             { colorMat: src, grayMat, width: src.cols, height: src.rows },
-            { hintN });
+            { hintN, forceRows, forceCols });
           if (!pipeResult) {
             el('status').textContent = 'Pipeline failed (grid detection).';
             return;
