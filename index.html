@@ -83,6 +83,12 @@
           <span>×</span>
           <label>Cols <input type="number" id="photo-hint-cols" min="2" max="25"></label>
         </div>
+        <div id="photo-edges-row" hidden>
+          <button class="edge-toggle" data-edge="top">Top</button>
+          <button class="edge-toggle" data-edge="bottom">Bottom</button>
+          <button class="edge-toggle" data-edge="left">Left</button>
+          <button class="edge-toggle" data-edge="right">Right</button>
+        </div>
         <p id="photo-status"></p>
       </div>
       <div id="photo-modal-body" hidden>
@@ -105,6 +111,7 @@
     import { parse }            from './sgf-parser.js';
     import { renderGoban, replayMain } from './goban.js';
     import { runPipeline }      from './run-pipeline.js';
+    import { inferBoardSize, computeEdgeOffsets } from './photo-pipeline.js';
 
     const board       = document.getElementById('board');
     const gameInfo    = document.getElementById('game-info');
@@ -207,35 +214,44 @@
       }
     }
 
-    function photoResultToSGF(result) {
+    function photoResultToSGF(result, elidedEdges) {
+      const boardN = elidedEdges
+        ? inferBoardSize(result.nRows, result.nCols, elidedEdges)
+        : Math.max(result.nRows, result.nCols);
+      const rowOff = elidedEdges
+        ? computeEdgeOffsets(result.nRows, boardN, elidedEdges.top, elidedEdges.bottom) : 0;
+      const colOff = elidedEdges
+        ? computeEdgeOffsets(result.nCols, boardN, elidedEdges.left, elidedEdges.right) : 0;
+
       const ab = [], aw = [];
       for (let r = 0; r < result.nRows; r++) {
         for (let c = 0; c < result.nCols; c++) {
           const v = result.grid[r][c];
           if (v !== 'B' && v !== 'W') continue;
-          const coord = String.fromCharCode(97 + c) + String.fromCharCode(97 + r);
+          const coord = String.fromCharCode(97 + c + colOff) + String.fromCharCode(97 + r + rowOff);
           (v === 'B' ? ab : aw).push(`[${coord}]`);
         }
       }
-      const sz = result.nCols === result.nRows ? result.nCols : `${result.nCols}:${result.nRows}`;
-      let p = `SZ[${sz}]`;
+      let p = `SZ[${boardN}]`;
       if (ab.length) p += `AB${ab.join('')}`;
       if (aw.length) p += `AW${aw.join('')}`;
       return `(;${p})`;
     }
 
-    function renderPhotoBoard(result, container) {
-      renderGoban(parse(photoResultToSGF(result)), container, { forceFullBoard: true, jitter: 0 });
+    function renderPhotoBoard(result, elidedEdges, container) {
+      renderGoban(parse(photoResultToSGF(result, elidedEdges)), container, { forceFullBoard: true, jitter: 0 });
     }
 
-    let lastPhotoFile   = null;
-    let lastPhotoResult = null;
-    let savedOverlay    = null; // { intersections, step } in rectified coords
-    let photoRerunTimer = null;
+    let lastPhotoFile      = null;
+    let lastPhotoResult    = null;
+    let savedOverlay       = null; // { intersections, step } in rectified coords
+    let photoRerunTimer    = null;
+    let currentElidedEdges = null; // user-overridable elided edges
 
     const photoModalEl  = document.getElementById('photo-modal');
     const photoStatusEl = document.getElementById('photo-status');
     const photoDimsEl   = document.getElementById('photo-dims-row');
+    const photoEdgesEl  = document.getElementById('photo-edges-row');
     const photoBodyEl   = document.getElementById('photo-modal-body');
     const photoAcceptEl = document.getElementById('photo-accept-btn');
 
@@ -243,8 +259,9 @@
       photoModalEl.hidden  = false;
       photoStatusEl.hidden = false;
       if (!lastPhotoResult) {
-        photoDimsEl.hidden  = true;
-        photoBodyEl.hidden  = true;
+        photoDimsEl.hidden   = true;
+        photoEdgesEl.hidden  = true;
+        photoBodyEl.hidden   = true;
         photoAcceptEl.hidden = true;
       }
     }
@@ -253,7 +270,7 @@
       photoModalEl.hidden = true;
     }
 
-    async function processPhoto(file, hintN = 0) {
+    async function processPhoto(file, hintN = 0, { forceRows = 0, forceCols = 0 } = {}) {
       lastPhotoFile = file;
       openPhotoModal();
       photoStatusEl.textContent = 'Loading OpenCV\u2026';
@@ -270,7 +287,7 @@
         savedOverlay = null;
 
         const result = runPipeline(mats, {
-          hintN,
+          hintN, forceRows, forceCols,
           onStage(name) { photoStatusEl.textContent = name; },
           onIntermediate(name, data) {
             if (name === 'rectification') {
@@ -296,17 +313,21 @@
         }
 
         lastPhotoResult = result;
+        currentElidedEdges = result.elidedEdges
+          ?? { top: false, bottom: false, left: false, right: false };
         photoStatusEl.textContent = '';
         photoStatusEl.hidden = true;
 
         if (savedOverlay) {
           drawPhotoOverlay(previewCanvas, savedOverlay, result.grid, result.nRows, result.nCols);
         }
-        renderPhotoBoard(result, document.getElementById('photo-board-preview'));
+        renderPhotoBoard(result, currentElidedEdges, document.getElementById('photo-board-preview'));
 
         document.getElementById('photo-hint-rows').value = result.nRows;
         document.getElementById('photo-hint-cols').value = result.nCols;
+        updateEdgeToggles(currentElidedEdges);
         photoDimsEl.hidden   = false;
+        photoEdgesEl.hidden  = false;
         photoBodyEl.hidden   = false;
         photoAcceptEl.hidden = false;
       } catch (e) {
@@ -334,7 +355,7 @@
         const rows = parseInt(document.getElementById('photo-hint-rows').value, 10);
         const cols = parseInt(document.getElementById('photo-hint-cols').value, 10);
         if (lastPhotoFile && rows >= 2 && cols >= 2) {
-          processPhoto(lastPhotoFile, Math.max(rows, cols));
+          processPhoto(lastPhotoFile, 0, { forceRows: rows, forceCols: cols });
         }
       }, 600);
     }
@@ -342,9 +363,34 @@
     document.getElementById('photo-hint-rows').addEventListener('input', schedulePhotoRerun);
     document.getElementById('photo-hint-cols').addEventListener('input', schedulePhotoRerun);
 
+    function updateEdgeToggles(elided) {
+      for (const btn of document.querySelectorAll('.edge-toggle')) {
+        const edge = btn.dataset.edge;
+        const isElided = elided[edge];
+        btn.classList.toggle('elided', isElided);
+        btn.textContent = btn.dataset.edge.charAt(0).toUpperCase()
+          + btn.dataset.edge.slice(1)
+          + (isElided ? ' \u2026' : ' \u2500');
+      }
+    }
+
+    function refreshPhotoBoardPreview() {
+      if (!lastPhotoResult) return;
+      renderPhotoBoard(lastPhotoResult, currentElidedEdges, document.getElementById('photo-board-preview'));
+    }
+
+    for (const btn of document.querySelectorAll('.edge-toggle')) {
+      btn.addEventListener('click', () => {
+        const edge = btn.dataset.edge;
+        currentElidedEdges = { ...currentElidedEdges, [edge]: !currentElidedEdges[edge] };
+        updateEdgeToggles(currentElidedEdges);
+        refreshPhotoBoardPreview();
+      });
+    }
+
     photoAcceptEl.addEventListener('click', () => {
       closePhotoModal();
-      const sgf = photoResultToSGF(lastPhotoResult);
+      const sgf = photoResultToSGF(lastPhotoResult, currentElidedEdges);
       textarea.value = sgf;
       render(sgf);
       scheduleHashUpdate(sgf, true);

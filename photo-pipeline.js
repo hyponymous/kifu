@@ -533,7 +533,7 @@ function buildIntersections(rowPos, colPos, gridAngle, W, H) {
 
 // ── detectGrid ──────────────────────────────────────────────────────────────
 
-function detectGrid(grayMat, hintN, circleSens = 21) {
+function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols } = {}) {
   const W      = grayMat.cols, H = grayMat.rows;
   const refN   = hintN > 0 ? hintN : 19;
   const estStep = W / (refN + 1);
@@ -764,9 +764,9 @@ function detectGrid(grayMat, hintN, circleSens = 21) {
 
   const clusterTol = Math.max(8, Math.round(stepHint * 0.2));
 
-  const rowResult = fitGrid(hVotes, hintN, stepHint, 'rows', clusterTol);
+  const rowResult = fitGrid(hVotes, forceRows || hintN, stepHint, 'rows', clusterTol);
   if (!rowResult) return null;
-  const colResult = fitGrid(vVotes, hintN, stepHint, 'cols', clusterTol);
+  const colResult = fitGrid(vVotes, forceCols || hintN, stepHint, 'cols', clusterTol);
   if (!colResult) return null;
 
   // Refine grid model using filtered Harris corners
@@ -876,8 +876,8 @@ function detectGrid(grayMat, hintN, circleSens = 21) {
 
   const rowQ = lineQuality(rowResult.snapped, rotatedXs, rotatedYs, stepHint);
   const colQ = lineQuality(colResult.snapped, rotatedYs, rotatedXs, stepHint);
-  trimBadEdges(rowResult, rowQ, stepHint, houghRowPositions, 'row');
-  trimBadEdges(colResult, colQ, stepHint, houghColPositions, 'col');
+  if (!forceRows) trimBadEdges(rowResult, rowQ, stepHint, houghRowPositions, 'row');
+  if (!forceCols) trimBadEdges(colResult, colQ, stepHint, houghColPositions, 'col');
 
   const uniformRowPos = rowResult.uniform, rowPos = rowResult.snapped;
   const uniformColPos = colResult.uniform, colPos = colResult.snapped;

@@ -168,7 +168,7 @@
     import { renderGoban }   from '../goban.js';
     import {
       nearestIndex, buildIntersections,
-      extractStonePatches, detectElidedEdges,
+      extractStonePatches,
       generateSGF,
     } from '../photo-pipeline.js';
     import { runPipeline as sharedRunPipeline } from '../run-pipeline.js';
@@ -530,17 +530,14 @@
           }
         }
 
-        // ── Elided edge detection ────────────────────────────────────────────
-        let elidedEdges = null;
-        if (lastDewarpedGray) {
-          elidedEdges = detectElidedEdges(lastDewarpedGray, finalDetection, stones);
-          const elidedNames = ['top','bottom','left','right'].filter(e => elidedEdges[e]);
-          const elidedText = elidedNames.length
-            ? 'Elided: ' + elidedNames.join(', ')
-            : 'No elided edges';
-          console.log('Elided edges:', JSON.stringify(elidedEdges));
-          setStatus(elidedText);
-        }
+        // ── Elided edge detection (from pipeline result) ─────────────────────
+        const elidedEdges = result.elidedEdges;
+        const elidedNames = ['top','bottom','left','right'].filter(e => elidedEdges[e]);
+        const elidedText = elidedNames.length
+          ? 'Elided: ' + elidedNames.join(', ')
+          : 'No elided edges';
+        console.log('Elided edges:', JSON.stringify(elidedEdges));
+        setStatus(elidedText);
 
         // SGF output
         const sgf = generateSGF(stones, result.nRows, elidedEdges, result.nCols,

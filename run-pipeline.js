@@ -59,6 +59,8 @@ export function runPipeline({ colorMat, grayMat, width, height }, opts = {}) {
   const reDetect = opts.reDetect ?? true;
   const combinedGrid = opts.combinedGrid ?? true;
   const hintN = opts.hintN ?? 0;
+  const forceRows = opts.forceRows ?? 0;
+  const forceCols = opts.forceCols ?? 0;
   const rpThreshRatio = opts.rpThreshRatio ?? 0.85;
   const gradFloor = opts.gradFloor ?? 64;
   const onStage = opts.onStage ?? null;
@@ -117,7 +119,7 @@ export function runPipeline({ colorMat, grayMat, width, height }, opts = {}) {
     // ── Grid detection ────────────────────────────────────────────────────
     const detection = timed('detectGrid', () => {
       const circleSens = 24;
-      return fns.detectGrid(rectGray, hintN, circleSens);
+      return fns.detectGrid(rectGray, hintN, circleSens, { forceRows, forceCols });
     });
     if (!detection) return null;
     if (onIntermediate) onIntermediate('detectGrid', { detection });
@@ -201,7 +203,7 @@ export function runPipeline({ colorMat, grayMat, width, height }, opts = {}) {
 
       if (reDetect && finalDetection === detection) {
         const circleSens = 24;
-        const detection2 = fns.detectGrid(dewarpedGray, hintN, circleSens);
+        const detection2 = fns.detectGrid(dewarpedGray, hintN, circleSens, { forceRows, forceCols });
         if (detection2
           && detection2.rowPos.length === nRows
           && detection2.colPos.length === nCols) {
@@ -221,6 +223,12 @@ export function runPipeline({ colorMat, grayMat, width, height }, opts = {}) {
     });
 
     if (onIntermediate) onIntermediate('classification', { classResult, finalDetection });
+
+    // ── Elided edge detection ──────────────────────────────────────────────
+    const elidedEdges = timed('elidedEdges', () =>
+      fns.detectElidedEdges(dewarpedGray, finalDetection, classResult.stones)
+    );
+    if (onIntermediate) onIntermediate('elidedEdges', { elidedEdges });
 
     // Build stone grid
     const grid = Array.from({ length: nRows }, () => Array(nCols).fill('.'));
@@ -252,7 +260,7 @@ export function runPipeline({ colorMat, grayMat, width, height }, opts = {}) {
       return result;
     });
 
-    return { nRows, nCols, grid, detectedIntersections, rectCorners, rectW, rectH, classResult, finalDetection };
+    return { nRows, nCols, grid, detectedIntersections, rectCorners, rectW, rectH, classResult, finalDetection, elidedEdges };
   } finally {
     toDelete.forEach(m => { try { m.delete(); } catch {} });
   }
