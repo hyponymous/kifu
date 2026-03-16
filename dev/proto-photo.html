@@ -406,6 +406,9 @@
             cv.imshow(el('canvas-enhanced'), data.enhanced);
             updateLabel('canvas-enhanced');
           }
+          if (name === 'findGridBounds') {
+            drawGridBounds(data.bounds);
+          }
           if (name === 'detectGrid') {
             drawDetect1Features(data.detection);
             drawDetect1Grid(data.detection);
@@ -608,6 +611,19 @@
       ctx.fillText(total.toFixed(0) + 'ms', LABEL_W + PAD + BAR_W + PAD, totalY + ROW_H / 2);
 
       el('timing-wrap').style.display = '';
+    }
+
+    // ── Grid bounds overlay on rectified canvas ─────────────────────────────
+    function drawGridBounds(bounds) {
+      const canvas = el('canvas-rectified');
+      const ctx = canvas.getContext('2d');
+      const { x, y, width, height } = bounds;
+      ctx.strokeStyle = 'rgba(255,60,0,0.9)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, width, height);
+      ctx.font = '11px monospace';
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.fillText(`bounds ${width}×${height}`, x + 4, y - 4 > 12 ? y - 4 : y + 14);
     }
 
     // ── Detection1 feature overlay: Harris corners + circles ──────────────

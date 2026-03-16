@@ -156,10 +156,17 @@ export function runPipeline({ colorMat, grayMat, width, height }, opts = {}) {
       return { nRows, nCols, grid, detectedIntersections: forcedGrid, rectCorners, rectW, rectH, classResult, finalDetection: forcedDetection, elidedEdges };
     }
 
+    // ── Find tight board bounds ────────────────────────────────────────────
+    const gridBounds = timed('findGridBounds', () => {
+      const bounds = fns.findGridBounds(rectGray, cannyLo, cannyHi);
+      if (onIntermediate) onIntermediate('findGridBounds', { bounds });
+      return bounds;
+    });
+
     // ── Grid detection ────────────────────────────────────────────────────
     const detection = timed('detectGrid', () => {
       const circleSens = 24;
-      return fns.detectGrid(rectGray, hintN, circleSens, { forceRows, forceCols });
+      return fns.detectGrid(rectGray, hintN, circleSens, { forceRows, forceCols, gridBounds });
     });
     if (!detection) return null;
     if (onIntermediate) onIntermediate('detectGrid', { detection });

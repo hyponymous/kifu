@@ -43,6 +43,7 @@ const NO_PRE_SNAP = {
     snappedRows: rows, snappedCols: cols, snappedIntersections: intersections,
   }),
 };
+const NO_GRID_BOUNDS = { findGridBounds: (gray) => ({ x: 0, y: 0, width: gray.cols, height: gray.rows }) };
 const NO_TPS = { fitTPS: () => null };
 const NO_RANSAC = { ransacFilter: (pts) => pts };
 
@@ -57,6 +58,7 @@ const EXPERIMENTS = [
   { name: 'no-pre-snap', opts: { fns: NO_PRE_SNAP } },
   { name: 'no-tps', opts: { fns: NO_TPS } },
   { name: 'no-ransac', opts: { fns: NO_RANSAC } },
+  { name: 'no-grid-bounds',  opts: { fns: NO_GRID_BOUNDS } },
   { name: 'no-re-detection', opts: { reDetect: false } },
   { name: 'no-combined-grid', opts: { combinedGrid: false } },
 
@@ -141,10 +143,16 @@ async function main() {
       const image = await loadImage(fixture.data.image);
 
       const timing = {};
-      const result = runPipeline(image, {
-        ...experiment.opts,
-        onStage: (name, ms) => { timing[name] = ms; },
-      });
+      let result;
+      try {
+        result = runPipeline(image, {
+          ...experiment.opts,
+          onStage: (name, ms) => { timing[name] = ms; },
+        });
+      } finally {
+        image.colorMat.delete();
+        image.grayMat.delete();
+      }
 
       if (!result) {
         fixtureResults[fixture.name] = { matchRate: 0, mismatches: -1, timing };

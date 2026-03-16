@@ -553,9 +553,63 @@ function buildIntersections(rowPos, colPos, gridAngle, W, H) {
   );
 }
 
+// ── Find tight board bounds via edge contours ───────────────────────────────
+
+function findGridBounds(grayMat, cannyLo = 50, cannyHi = 125) {
+  const W = grayMat.cols, H = grayMat.rows;
+  const cx = W / 2, cy = H / 2;
+
+  const edges = new cv.Mat();
+  cv.Canny(grayMat, edges, cannyLo, cannyHi);
+
+  // Small dilation to reconnect edge junctions suppressed by Canny's
+  // non-maximum suppression (perpendicular grid lines lose connectivity
+  // at intersections).  1px expansion won't bridge the gap to nearby text.
+  const kernel = cv.Mat.ones(3, 3, cv.CV_8U);
+  cv.dilate(edges, edges, kernel);
+  kernel.delete();
+
+  const contours = new cv.MatVector();
+  const hierarchy = new cv.Mat();
+  cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+  edges.delete(); hierarchy.delete();
+
+  let bestRect = null, bestArea = 0;
+
+  // Prefer the largest contour whose bounding rect contains the image center
+  for (let i = 0; i < contours.size(); i++) {
+    const r = cv.boundingRect(contours.get(i));
+    const area = r.width * r.height;
+    if (area <= bestArea) continue;
+    if (r.x <= cx && r.y <= cy &&
+        r.x + r.width >= cx && r.y + r.height >= cy) {
+      bestArea = area;
+      bestRect = r;
+    }
+  }
+
+  // Fallback: largest overall
+  if (!bestRect) {
+    for (let i = 0; i < contours.size(); i++) {
+      const r = cv.boundingRect(contours.get(i));
+      const area = r.width * r.height;
+      if (area > bestArea) {
+        bestArea = area;
+        bestRect = r;
+      }
+    }
+  }
+  contours.delete();
+
+  if (!bestRect) return new cv.Rect(0, 0, W, H);
+
+  console.log(`[findGridBounds] ${W}×${H} → ${bestRect.width}×${bestRect.height} at (${bestRect.x},${bestRect.y})`);
+  return bestRect;
+}
+
 // ── detectGrid ──────────────────────────────────────────────────────────────
 
-function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols } = {}) {
+function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols, gridBounds } = {}) {
   const W      = grayMat.cols, H = grayMat.rows;
   const refN   = hintN > 0 ? hintN : 19;
   const estStep = W / (refN + 1);
@@ -570,7 +624,21 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols } = 
     harrisCorners.push({ x: cornersMat.floatAt(i, 0), y: cornersMat.floatAt(i, 1) });
   }
   cornersMat.delete();
-  console.log(`[detectGrid] harrisCorners=${harrisCorners.length}`);
+
+  // Filter features by grid bounds (tight board rectangle) if provided
+  const inBounds = gridBounds
+    ? (x, y) => x >= gridBounds.x && x <= gridBounds.x + gridBounds.width &&
+                 y >= gridBounds.y && y <= gridBounds.y + gridBounds.height
+    : () => true;
+  if (gridBounds) {
+    const before = harrisCorners.length;
+    for (let i = harrisCorners.length - 1; i >= 0; i--) {
+      if (!inBounds(harrisCorners[i].x, harrisCorners[i].y)) harrisCorners.splice(i, 1);
+    }
+    console.log(`[detectGrid] harrisCorners=${before} → ${harrisCorners.length} after bounds filter`);
+  } else {
+    console.log(`[detectGrid] harrisCorners=${harrisCorners.length}`);
+  }
 
   const nnStep = nearestNeighborStep(harrisCorners);
 
@@ -611,7 +679,7 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols } = 
       const x = circlesMat.data32F[i * 3] / candScale;
       const y = circlesMat.data32F[i * 3 + 1] / candScale;
       const r = circlesMat.data32F[i * 3 + 2] / candScale;
-      if (x >= 0 && x <= W && y >= 0 && y <= H) circles.push({ x, y, r });
+      if (x >= 0 && x <= W && y >= 0 && y <= H && inBounds(x, y)) circles.push({ x, y, r });
     }
     circlesMat.delete();
 
@@ -634,6 +702,16 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols } = 
   cv.GaussianBlur(grayMat, blurMat, new cv.Size(3, 3), 0);
   cv.Canny(blurMat, edgesMat, 50, 125);
   blurMat.delete();
+
+  // Mask out edges outside grid bounds (before Hough vote accumulation)
+  if (gridBounds) {
+    const mask = cv.Mat.zeros(H, W, cv.CV_8U);
+    const roi = mask.roi(gridBounds);
+    roi.setTo(new cv.Scalar(255));
+    roi.delete();
+    cv.bitwise_and(edgesMat, mask, edgesMat);
+    mask.delete();
+  }
 
   if (rawCircles.length > 0) {
     const mask = cv.Mat.zeros(H, W, cv.CV_8U);
@@ -744,6 +822,8 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols } = 
     if (Math.abs(theta - hAngle) < angleTol || Math.abs(theta - Math.PI - hAngle) < angleTol) {
       const y = Math.abs(Math.sin(theta)) > 0.1 ? rho / Math.sin(theta) : null;
       if (y != null && y >= 0 && y <= H) {
+        // Filter by bounds: row lines are horizontal, check y is within bounds
+        if (gridBounds && (y < gridBounds.y || y > gridBounds.y + gridBounds.height)) continue;
         rawHoughRows.push(y);
         houghLines.push({ rho, theta, axis: 'row' });
         houghH++;
@@ -751,6 +831,8 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols } = 
     } else if (Math.abs(theta - vAngle) < angleTol || Math.abs(theta - Math.PI - vAngle) < angleTol) {
       const x = Math.abs(Math.cos(theta)) > 0.1 ? rho / Math.cos(theta) : null;
       if (x != null && x >= 0 && x <= W) {
+        // Filter by bounds: col lines are vertical, check x is within bounds
+        if (gridBounds && (x < gridBounds.x || x > gridBounds.x + gridBounds.width)) continue;
         rawHoughCols.push(x);
         houghLines.push({ rho, theta, axis: 'col' });
         houghV++;
@@ -2387,6 +2469,9 @@ export {
   // board detection
   refineQuadWithHough,
   findBoardCornersCore,
+
+  // grid bounds
+  findGridBounds,
 
   // grid detection
   clusterPositions,
