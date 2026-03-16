@@ -80,7 +80,7 @@ for (const filePath of files) {
     // TPS dewarp
     const uniformIntersections = buildIntersections(
       detection.uniformRowPos, detection.uniformColPos,
-      detection.gridAngle, rectGray.cols, rectGray.rows);
+      detection.rowAngle, detection.colAngle, rectGray.cols, rectGray.rows);
     const { snappedRows, snappedCols, snappedIntersections } = preSnapToCircles(
       detection.uniformRowPos, detection.uniformColPos,
       detection.rawCircles, uniformIntersections);

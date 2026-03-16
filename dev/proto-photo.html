@@ -704,7 +704,7 @@
       ctx.drawImage(src, 0, 0);
       updateLabel('canvas-d1-grid');
 
-      const { intersections, uniformRowPos, uniformColPos, gridAngle } = detection;
+      const { intersections, uniformRowPos, uniformColPos, rowAngle, colAngle } = detection;
       const nR = intersections.length, nC = intersections[0].length;
 
       // Fitted grid lines — yellow
@@ -725,7 +725,7 @@
 
       // Grid extent — bright green quad
       const W = dst.width, H = dst.height;
-      const uInter = buildIntersections(uniformRowPos, uniformColPos, gridAngle, W, H);
+      const uInter = buildIntersections(uniformRowPos, uniformColPos, rowAngle, colAngle, W, H);
       const uNR = uInter.length, uNC = uInter[0].length;
       const corners = [
         uInter[0][0], uInter[0][uNC-1],

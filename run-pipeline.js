@@ -178,7 +178,7 @@ export function runPipeline({ colorMat, grayMat, width, height }, opts = {}) {
     const { snappedRows, snappedCols, snappedIntersections } = timed('preSnap', () => {
       const uniformIntersections = fns.buildIntersections(
         detection.uniformRowPos, detection.uniformColPos,
-        detection.gridAngle, rectGray.cols, rectGray.rows);
+        detection.rowAngle, detection.colAngle, rectGray.cols, rectGray.rows);
       return fns.preSnapToCircles(
         detection.uniformRowPos, detection.uniformColPos,
         detection.rawCircles, uniformIntersections);
