@@ -144,6 +144,7 @@ async function main() {
 
       if (!result) {
         fixtureResults[fixture.name] = { matchRate: 0, mismatches: -1, timing };
+        matchRates.push(0);
         failures++;
         continue;
       }
@@ -153,6 +154,7 @@ async function main() {
       const expectedCols = fixture.data.boardCols;
       if (result.nRows !== expectedRows || result.nCols !== expectedCols) {
         fixtureResults[fixture.name] = { matchRate: 0, mismatches: -1, timing };
+        matchRates.push(0);
         failures++;
         continue;
       }

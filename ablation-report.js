@@ -1,11 +1,6 @@
 #!/usr/bin/env node
 // ablation-report.js — reads evals/ablation.eval.jsonl and prints comparison tables
 //
-// TODO: Incorporate failures into aggregate metrics instead of silently excluding them.
-//       Currently a failure (mismatches < 0 / grid detection failure) drops out of the
-//       mean, which makes experiments that break fixtures look *better* on average.
-//       Options: count failures as 0% match, add a "failures" column, or weight the
-//       aggregate so a failure can never improve the summary score.
 //
 // Usage:
 //   node ablation-report.js                        # latest run per experiment
@@ -64,23 +59,26 @@ function printSummaryTable() {
   }
   console.log('');
 
-  const header = padRow('Experiment', 'Match%', 'GridErr', 'Time', 'Δ vs baseline');
+  const header = padRow('Experiment', 'Match%', 'Fail', 'GridErr', 'Δ vs baseline');
   console.log(header);
   console.log('─'.repeat(78));
 
   const baseMatch = baseline?.aggregate?.matchRateMean;
+  const baseFail = baseline?.aggregate?.failures ?? 0;
   const baseGrid = baseline?.aggregate?.gridErrorMean;
-  const baseTime = baseline?.aggregate?.timingMean?.total;
 
   for (const [name, record] of byExperiment) {
     const r = showAll ? record[record.length - 1] : record;
     const matchPct = (r.aggregate.matchRateMean * 100).toFixed(2) + '%';
+    const fail = r.aggregate.failures ?? 0;
+    const failStr = fail > 0 ? String(fail) : '-';
     const gridErr = r.aggregate.gridErrorMean != null ? r.aggregate.gridErrorMean.toFixed(2) + 'px' : 'n/a';
-    const time = r.aggregate.timingMean?.total ? r.aggregate.timingMean.total.toFixed(0) + 'ms' : 'n/a';
 
     let delta = '---';
     if (name !== 'baseline' && baseMatch != null) {
       const parts = [];
+      const dFail = fail - baseFail;
+      if (dFail > 0) parts.push(`+${dFail} FAIL`);
       const dMatch = r.aggregate.matchRateMean - baseMatch;
       if (Math.abs(dMatch) >= 0.0001) {
         parts.push((dMatch > 0 ? '+' : '') + (dMatch * 100).toFixed(2) + '%');
@@ -91,16 +89,11 @@ function printSummaryTable() {
           parts.push((dGrid > 0 ? '+' : '') + dGrid.toFixed(2) + 'px');
         }
       }
-      if (r.aggregate.timingMean?.total != null && baseTime != null) {
-        const dTime = r.aggregate.timingMean.total - baseTime;
-        if (Math.abs(dTime) >= 1) {
-          parts.push((dTime > 0 ? '+' : '') + dTime.toFixed(0) + 'ms');
-        }
-      }
+      if (dFail < 0) parts.push(`${dFail} fail`);
       delta = parts.join(', ') || '~same';
     }
 
-    console.log(padRow(name, matchPct, gridErr, time, delta));
+    console.log(padRow(name, matchPct, failStr, gridErr, delta));
   }
 
   console.log('');
