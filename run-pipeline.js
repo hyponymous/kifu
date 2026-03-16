@@ -46,6 +46,8 @@ export function computeInversePerspective(rectCorners, rectW, rectH) {
  * @param {number} [opts.hintN=0]
  * @param {number} [opts.rpThreshRatio=0.85]
  * @param {number} [opts.gradFloor=64]
+ * @param {Array<{x,y}>} [opts.rectCorners] - lock perspective corners (skip board detection)
+ * @param {Array<{x,y,r,c}>} [opts.forcedGrid] - skip grid detection, use these points
  * @param {(name: string, ms: number) => void} [opts.onStage]
  * @param {(name: string, data: object) => void} [opts.onIntermediate]
  * @returns {{ nRows, nCols, grid, detectedIntersections } | null}
@@ -63,6 +65,8 @@ export function runPipeline({ colorMat, grayMat, width, height }, opts = {}) {
   const forceCols = opts.forceCols ?? 0;
   const rpThreshRatio = opts.rpThreshRatio ?? 0.85;
   const gradFloor = opts.gradFloor ?? 64;
+  const lockedRectCorners = opts.rectCorners ?? null;
+  const forcedGrid = opts.forcedGrid ?? null;
   const onStage = opts.onStage ?? null;
   const onIntermediate = opts.onIntermediate ?? null;
 
@@ -79,6 +83,9 @@ export function runPipeline({ colorMat, grayMat, width, height }, opts = {}) {
   try {
     // ── Board detection ───────────────────────────────────────────────────
     const { rectCorners, edges } = timed('boardDetection', () => {
+      if (lockedRectCorners) {
+        return { rectCorners: lockedRectCorners, edges: null };
+      }
       const blur = mat(new cv.Mat());
       const edges = mat(new cv.Mat());
       cv.GaussianBlur(grayMat, blur, new cv.Size(5, 5), 0);
@@ -90,7 +97,7 @@ export function runPipeline({ colorMat, grayMat, width, height }, opts = {}) {
       ];
       return { rectCorners, edges };
     });
-    if (onIntermediate) onIntermediate('boardDetection', { edges });
+    if (onIntermediate && edges) onIntermediate('boardDetection', { edges });
 
     // ── Rectification ─────────────────────────────────────────────────────
     const { rectified, rectW, rectH } = timed('rectification', () => {
@@ -115,6 +122,39 @@ export function runPipeline({ colorMat, grayMat, width, height }, opts = {}) {
       return mat(fns.enhanceGray(rectGrayBlurred, false));
     });
     if (onIntermediate) onIntermediate('enhanceGray', { enhanced: rectGray });
+
+    // ── Forced grid shortcut ────────────────────────────────────────────────
+    // When forcedGrid is provided, skip grid detection / dewarp / re-detection
+    // and go straight to classification on the rectified image.
+    if (forcedGrid) {
+      const forcedDetection = timed('forcedGrid', () =>
+        fns.buildDetectionFromGrid(forcedGrid, rectCorners, rectW, rectH)
+      );
+      if (onIntermediate) onIntermediate('detectGrid', { detection: forcedDetection });
+
+      const nRows = forcedDetection.rowPos.length;
+      const nCols = forcedDetection.colPos.length;
+
+      const classResult = timed('classification', () =>
+        fns.classifyStones(rectGray, forcedDetection.rowPos, forcedDetection.colPos,
+          forcedDetection.step, forcedDetection.rawCircles,
+          forcedDetection.intersections, true,
+          { rpThreshRatio, gradFloor })
+      );
+      if (onIntermediate) onIntermediate('classification', { classResult, finalDetection: forcedDetection });
+
+      const elidedEdges = timed('elidedEdges', () =>
+        fns.detectElidedEdges(rectGray, forcedDetection, classResult.stones)
+      );
+      if (onIntermediate) onIntermediate('elidedEdges', { elidedEdges });
+
+      const grid = Array.from({ length: nRows }, () => Array(nCols).fill('.'));
+      for (const s of classResult.stones) {
+        if (s.r < nRows && s.c < nCols) grid[s.r][s.c] = s.color;
+      }
+
+      return { nRows, nCols, grid, detectedIntersections: forcedGrid, rectCorners, rectW, rectH, classResult, finalDetection: forcedDetection, elidedEdges };
+    }
 
     // ── Grid detection ────────────────────────────────────────────────────
     const detection = timed('detectGrid', () => {

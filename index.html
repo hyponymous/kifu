@@ -98,6 +98,7 @@
         <div class="photo-modal-board" id="photo-board-preview"></div>
       </div>
       <div id="photo-modal-footer">
+        <button id="photo-adjust-btn" hidden>Adjust grid</button>
         <button id="photo-accept-btn" hidden>Accept</button>
         <button id="photo-cancel-btn">Cancel</button>
       </div>
@@ -110,8 +111,8 @@
     import { decode, download } from './decode.js';
     import { parse }            from './sgf-parser.js';
     import { renderGoban, replayMain } from './goban.js';
-    import { runPipeline }      from './run-pipeline.js';
-    import { inferBoardSize, computeEdgeOffsets } from './photo-pipeline.js';
+    import { runPipeline, computeInversePerspective, applyHomography } from './run-pipeline.js';
+    import { inferBoardSize, computeEdgeOffsets, fitTPS, evalTPS } from './photo-pipeline.js';
 
     const board       = document.getElementById('board');
     const gameInfo    = document.getElementById('game-info');
@@ -214,6 +215,402 @@
       }
     }
 
+    // ── Grid dot rendering ──────────────────────────────────────────────────
+    function drawGridDots(canvas) {
+      if (!gridDots || !adjustGridMode || !lastPhotoResult) return;
+      const ctx = canvas.getContext('2d');
+      const step = savedOverlay ? savedOverlay.step : 30;
+      const dotRadius = Math.max(3, step * 0.3);
+      const nR = lastPhotoResult.nRows, nC = lastPhotoResult.nCols;
+
+      // Build a lookup from (r,c) to dot for grid lines
+      const dotAt = Array.from({ length: nR }, () => []);
+      for (const dot of gridDots) dotAt[dot.r][dot.c] = dot;
+
+      // Grid lines through dot positions
+      ctx.strokeStyle = 'rgba(0,255,80,0.75)';
+      ctx.lineWidth = 1.5;
+      for (let r = 0; r < nR; r++) {
+        ctx.beginPath();
+        let started = false;
+        for (let c = 0; c < nC; c++) {
+          const d = dotAt[r][c];
+          if (!d) continue;
+          started ? ctx.lineTo(d.x, d.y) : ctx.moveTo(d.x, d.y);
+          started = true;
+        }
+        ctx.stroke();
+      }
+      for (let c = 0; c < nC; c++) {
+        ctx.beginPath();
+        let started = false;
+        for (let r = 0; r < nR; r++) {
+          const d = dotAt[r][c];
+          if (!d) continue;
+          started ? ctx.lineTo(d.x, d.y) : ctx.moveTo(d.x, d.y);
+          started = true;
+        }
+        ctx.stroke();
+      }
+
+      // Stone markers at dot positions
+      const stoneRadius = Math.max(3, step * 0.38);
+      for (const dot of gridDots) {
+        const v = lastPhotoResult.grid[dot.r]?.[dot.c];
+        if (v !== 'B' && v !== 'W') continue;
+        ctx.beginPath();
+        ctx.arc(dot.x, dot.y, stoneRadius, 0, Math.PI * 2);
+        ctx.fillStyle = v === 'B' ? 'rgba(17,17,17,0.75)' : 'rgba(240,240,240,0.75)';
+        ctx.fill();
+        ctx.strokeStyle = v === 'B' ? 'rgba(255,255,255,0.35)' : '#333';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
+      // Control point dots (pinned / hovered only)
+      for (let i = 0; i < gridDots.length; i++) {
+        const dot = gridDots[i];
+        const isPinned = pinnedDots.has(i);
+        const isHovered = (i === hoveredDot);
+
+        if (!isPinned && !isHovered) continue;
+
+        if (isPinned) {
+          const half = dotRadius * 0.85;
+          ctx.fillStyle = 'rgba(124, 92, 191, 0.7)';
+          ctx.strokeStyle = 'rgba(160, 130, 220, 0.9)';
+          ctx.lineWidth = 1.5;
+          ctx.fillRect(dot.x - half, dot.y - half, half * 2, half * 2);
+          ctx.strokeRect(dot.x - half, dot.y - half, half * 2, half * 2);
+        } else {
+          ctx.beginPath();
+          ctx.arc(dot.x, dot.y, dotRadius, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(0, 200, 80, 0.55)';
+          ctx.strokeStyle = 'rgba(0, 255, 100, 0.8)';
+          ctx.lineWidth = 1.5;
+          ctx.fill();
+          ctx.stroke();
+        }
+      }
+    }
+
+    function canvasFromEvent(e, canvas) {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      return {
+        x: (clientX - rect.left) * scaleX,
+        y: (clientY - rect.top) * scaleY,
+      };
+    }
+
+    function findNearestDot(cx, cy) {
+      if (!gridDots) return -1;
+      const step = savedOverlay ? savedOverlay.step : 30;
+      const hitRadius = Math.max(6, step * 0.45);
+      let bestIdx = -1, bestDist = hitRadius;
+      for (let i = 0; i < gridDots.length; i++) {
+        const d = Math.hypot(gridDots[i].x - cx, gridDots[i].y - cy);
+        if (d < bestDist) { bestDist = d; bestIdx = i; }
+      }
+      return bestIdx;
+    }
+
+    // ── TPS fit for grid adjustment ─────────────────────────────────────────
+    function fitGridTPS() {
+      if (!gridDots || pinnedDots.size < 3) { lastTpsFit = null; return; }
+      const ptsX = [], ptsY = [];
+      for (const idx of pinnedDots) {
+        const dot = gridDots[idx];
+        ptsX.push({ x: dot.r, y: dot.c, target: dot.x });
+        ptsY.push({ x: dot.r, y: dot.c, target: dot.y });
+      }
+      const tpsX = fitTPS(ptsX, 0.001);
+      const tpsY = fitTPS(ptsY, 0.001);
+      if (!tpsX || !tpsY) { lastTpsFit = null; return; }
+      lastTpsFit = { tpsX, tpsY };
+    }
+
+    function applyTpsFit() {
+      if (!lastTpsFit) return;
+      for (let i = 0; i < gridDots.length; i++) {
+        if (pinnedDots.has(i)) continue;
+        gridDots[i].x = evalTPS(lastTpsFit.tpsX, gridDots[i].r, gridDots[i].c);
+        gridDots[i].y = evalTPS(lastTpsFit.tpsY, gridDots[i].r, gridDots[i].c);
+      }
+    }
+
+    function refitGrid() {
+      fitGridTPS();
+      applyTpsFit();
+    }
+
+    function redrawPhotoPreview() {
+      if (!lastPhotoResult || !savedOverlay) return;
+      const previewCanvas = document.getElementById('photo-preview');
+      // Redraw rectified image
+      const img = previewCanvas._rectifiedImg;
+      if (img) {
+        const ctx = previewCanvas.getContext('2d');
+        ctx.putImageData(img, 0, 0);
+      }
+      if (adjustGridMode && gridDots) {
+        // In adjust mode: draw only dots (with grid curves from TPS), no pipeline overlay
+        drawGridDots(previewCanvas);
+      } else {
+        drawPhotoOverlay(previewCanvas, savedOverlay, lastPhotoResult.grid, lastPhotoResult.nRows, lastPhotoResult.nCols);
+      }
+    }
+
+    function buildOverlayFromDots() {
+      if (!gridDots || !lastPhotoResult) return savedOverlay;
+      const nR = lastPhotoResult.nRows, nC = lastPhotoResult.nCols;
+      const intersections = Array.from({ length: nR }, () => []);
+      for (const dot of gridDots) {
+        intersections[dot.r][dot.c] = { x: dot.x, y: dot.y };
+      }
+      return { intersections, step: savedOverlay.step };
+    }
+
+    // ── Reclassify after grid adjustment ────────────────────────────────────
+    async function reclassifyWithAdjustedGrid() {
+      if (!gridDots || !lastPhotoResult || !lastPhotoFile) return;
+
+      // Convert rectified-coord dots to original image coords via inverse perspective
+      const H = computeInversePerspective(
+        lastPhotoResult.rectCorners, lastPhotoResult.rectW, lastPhotoResult.rectH);
+      const originalCoordDots = gridDots.map(dot => {
+        const orig = applyHomography(H, dot.x, dot.y);
+        return { x: orig.x, y: orig.y, r: dot.r, c: dot.c };
+      });
+
+      try {
+        const img = new Image();
+        img.src = URL.createObjectURL(lastPhotoFile);
+        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
+        const mats = imageToMats(img);
+        URL.revokeObjectURL(img.src);
+
+        const previewCanvas = document.getElementById('photo-preview');
+
+        const result = runPipeline(mats, {
+          forceRows: lastPhotoResult.nRows,
+          forceCols: lastPhotoResult.nCols,
+          rectCorners: lastPhotoResult.rectCorners,
+          forcedGrid: originalCoordDots,
+          onIntermediate(name, data) {
+            // Skip rectification display — corners are locked, image is cached
+            if (name === 'detectGrid' && data.detection?.intersections) {
+              savedOverlay = {
+                intersections: data.detection.intersections.map(row =>
+                  row.map(pt => ({ x: pt.x, y: pt.y }))
+                ),
+                step: data.detection.step,
+              };
+            }
+          },
+        });
+
+        mats.colorMat.delete();
+        mats.grayMat.delete();
+
+        if (!result) return;
+
+        lastPhotoResult = result;
+        const detectedEdges = result.elidedEdges
+          ?? { top: false, bottom: false, left: false, right: false };
+        // Preserve user overrides for edges
+        currentElidedEdges = { ...detectedEdges, ...currentElidedEdges };
+
+        // Rebuild gridDots from new overlay
+        if (savedOverlay) {
+          const newDots = [];
+          for (let r = 0; r < result.nRows; r++) {
+            for (let c = 0; c < result.nCols; c++) {
+              const pt = savedOverlay.intersections[r]?.[c];
+              if (pt) newDots.push({ x: pt.x, y: pt.y, r, c });
+            }
+          }
+          gridDots = newDots;
+        }
+
+        // Redraw from cached rectified image — no canvas flash
+        redrawPhotoPreview();
+        renderPhotoBoard(result, currentElidedEdges, document.getElementById('photo-board-preview'));
+        updateEdgeToggles(currentElidedEdges);
+      } catch (e) {
+        console.error('Reclassification error:', e);
+      }
+    }
+
+    // ── Enter/exit adjust grid mode ──────────────────────────────────────────
+    function enterAdjustMode() {
+      if (!savedOverlay || !lastPhotoResult) return;
+      adjustGridMode = true;
+      photoAdjustEl.textContent = 'Exit adjust';
+
+      // Build gridDots from savedOverlay
+      gridDots = [];
+      const nR = lastPhotoResult.nRows, nC = lastPhotoResult.nCols;
+      for (let r = 0; r < nR; r++) {
+        for (let c = 0; c < nC; c++) {
+          const pt = savedOverlay.intersections[r]?.[c];
+          if (pt) gridDots.push({ x: pt.x, y: pt.y, r, c });
+        }
+      }
+      // Auto-pin the four corners
+      pinnedDots.clear();
+      pinnedDots.add(0);                           // top-left
+      pinnedDots.add(nC - 1);                      // top-right
+      pinnedDots.add((nR - 1) * nC);               // bottom-left
+      pinnedDots.add(nR * nC - 1);                 // bottom-right
+      lastTpsFit = null;
+      hoveredDot = -1;
+      draggingDot = -1;
+
+      const previewCanvas = document.getElementById('photo-preview');
+      // _rectifiedImg was already cached during processPhoto (clean, no overlay)
+      previewCanvas.classList.add('adjust-grid');
+      attachGridListeners(previewCanvas);
+      redrawPhotoPreview();
+    }
+
+    function exitAdjustMode() {
+      adjustGridMode = false;
+      photoAdjustEl.textContent = 'Adjust grid';
+      hoveredDot = -1;
+      draggingDot = -1;
+
+      const previewCanvas = document.getElementById('photo-preview');
+      previewCanvas.classList.remove('adjust-grid');
+      detachGridListeners(previewCanvas);
+      redrawPhotoPreview();
+    }
+
+    // ── Grid interaction handlers ────────────────────────────────────────────
+    let gridListenersAttached = false;
+    const gridHandlers = {};
+
+    function attachGridListeners(canvas) {
+      if (gridListenersAttached) return;
+      gridListenersAttached = true;
+
+      gridHandlers.mousemove = e => {
+        if (draggingDot >= 0) {
+          const pos = canvasFromEvent(e, canvas);
+          const dx = pos.x - dragStart.x;
+          const dy = pos.y - dragStart.y;
+          if (Math.abs(dx) > 1 || Math.abs(dy) > 1) didDrag = true;
+          gridDots[draggingDot].x = dragDotStart.x + dx;
+          gridDots[draggingDot].y = dragDotStart.y + dy;
+          refitGrid();
+          redrawPhotoPreview();
+          return;
+        }
+        // Hover detection
+        const pos = canvasFromEvent(e, canvas);
+        const idx = findNearestDot(pos.x, pos.y);
+        if (idx !== hoveredDot) {
+          hoveredDot = idx;
+          redrawPhotoPreview();
+        }
+      };
+
+      gridHandlers.mousedown = e => {
+        const pos = canvasFromEvent(e, canvas);
+        const idx = findNearestDot(pos.x, pos.y);
+        if (idx < 0) return;
+        e.preventDefault();
+        if (!pinnedDots.has(idx)) {
+          pinnedDots.add(idx);
+          refitGrid();
+          redrawPhotoPreview();
+        }
+        draggingDot = idx;
+        dragStart = pos;
+        dragDotStart = { x: gridDots[idx].x, y: gridDots[idx].y };
+        didDrag = false;
+      };
+
+      gridHandlers.mouseup = () => {
+        if (draggingDot >= 0 && didDrag) {
+          reclassifyWithAdjustedGrid();
+        } else if (draggingDot >= 0 && !didDrag && pinnedDots.has(draggingDot)) {
+          // Click without drag on pinned dot → unpin
+          pinnedDots.delete(draggingDot);
+          refitGrid();
+          reclassifyWithAdjustedGrid();
+        }
+        draggingDot = -1;
+        dragStart = null;
+        dragDotStart = null;
+      };
+
+      gridHandlers.touchstart = e => {
+        if (e.touches.length !== 1) return;
+        const pos = canvasFromEvent(e, canvas);
+        const idx = findNearestDot(pos.x, pos.y);
+        if (idx < 0) return;
+        e.preventDefault();
+        if (!pinnedDots.has(idx)) {
+          pinnedDots.add(idx);
+          refitGrid();
+          redrawPhotoPreview();
+        }
+        draggingDot = idx;
+        dragStart = pos;
+        dragDotStart = { x: gridDots[idx].x, y: gridDots[idx].y };
+        didDrag = false;
+      };
+
+      gridHandlers.touchmove = e => {
+        if (draggingDot < 0 || e.touches.length !== 1) return;
+        e.preventDefault();
+        const pos = canvasFromEvent(e, canvas);
+        const dx = pos.x - dragStart.x;
+        const dy = pos.y - dragStart.y;
+        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) didDrag = true;
+        gridDots[draggingDot].x = dragDotStart.x + dx;
+        gridDots[draggingDot].y = dragDotStart.y + dy;
+        refitGrid();
+        redrawPhotoPreview();
+      };
+
+      gridHandlers.touchend = e => {
+        if (e.touches.length > 0) return;
+        if (draggingDot >= 0 && didDrag) {
+          reclassifyWithAdjustedGrid();
+        } else if (draggingDot >= 0 && !didDrag && pinnedDots.has(draggingDot)) {
+          pinnedDots.delete(draggingDot);
+          refitGrid();
+          reclassifyWithAdjustedGrid();
+        }
+        draggingDot = -1;
+        dragStart = null;
+        dragDotStart = null;
+      };
+
+      canvas.addEventListener('mousemove', gridHandlers.mousemove);
+      canvas.addEventListener('mousedown', gridHandlers.mousedown);
+      window.addEventListener('mouseup', gridHandlers.mouseup);
+      canvas.addEventListener('touchstart', gridHandlers.touchstart, { passive: false });
+      canvas.addEventListener('touchmove', gridHandlers.touchmove, { passive: false });
+      canvas.addEventListener('touchend', gridHandlers.touchend);
+    }
+
+    function detachGridListeners(canvas) {
+      if (!gridListenersAttached) return;
+      gridListenersAttached = false;
+      canvas.removeEventListener('mousemove', gridHandlers.mousemove);
+      canvas.removeEventListener('mousedown', gridHandlers.mousedown);
+      window.removeEventListener('mouseup', gridHandlers.mouseup);
+      canvas.removeEventListener('touchstart', gridHandlers.touchstart);
+      canvas.removeEventListener('touchmove', gridHandlers.touchmove);
+      canvas.removeEventListener('touchend', gridHandlers.touchend);
+    }
+
     function photoResultToSGF(result, elidedEdges) {
       const boardN = elidedEdges
         ? inferBoardSize(result.nRows, result.nCols, elidedEdges)
@@ -248,27 +645,46 @@
     let photoRerunTimer    = null;
     let currentElidedEdges = null; // user-overridable elided edges
 
+    // ── Adjust grid state ──────────────────────────────────────────────────
+    let adjustGridMode = false;
+    let gridDots = null;         // flat array of { x, y, r, c } in rectified coords
+    let pinnedDots = new Set();  // indices into gridDots
+    let lastTpsFit = null;       // { tpsX, tpsY } or null
+    let hoveredDot = -1;
+    let draggingDot = -1;
+    let dragStart = null;        // { x, y } canvas coords at drag start
+    let dragDotStart = null;     // { x, y } dot position at drag start
+    let didDrag = false;
+
     const photoModalEl  = document.getElementById('photo-modal');
     const photoStatusEl = document.getElementById('photo-status');
     const photoDimsEl   = document.getElementById('photo-dims-row');
     const photoEdgesEl  = document.getElementById('photo-edges-row');
     const photoBodyEl   = document.getElementById('photo-modal-body');
     const photoAcceptEl = document.getElementById('photo-accept-btn');
+    const photoAdjustEl = document.getElementById('photo-adjust-btn');
 
     function openPhotoModal() {
       photoModalEl.hidden  = false;
       photoStatusEl.hidden = false;
       if (!lastPhotoResult) {
-        photoDimsEl.hidden   = true;
-        photoEdgesEl.hidden  = true;
-        photoBodyEl.hidden   = true;
-        photoAcceptEl.hidden = true;
+        photoDimsEl.hidden    = true;
+        photoEdgesEl.hidden   = true;
+        photoBodyEl.hidden    = true;
+        photoAcceptEl.hidden  = true;
+        photoAdjustEl.hidden  = true;
       }
     }
 
     function closePhotoModal() {
+      if (adjustGridMode) exitAdjustMode();
       photoModalEl.hidden = true;
     }
+
+    photoAdjustEl.addEventListener('click', () => {
+      if (adjustGridMode) exitAdjustMode();
+      else enterAdjustMode();
+    });
 
     async function processPhoto(file, hintN = 0, { forceRows = 0, forceCols = 0 } = {}) {
       lastPhotoFile = file;
@@ -283,6 +699,9 @@
         URL.revokeObjectURL(img.src);
         photoStatusEl.textContent = 'Detecting board\u2026';
 
+        // Reset adjust mode for new pipeline run
+        if (adjustGridMode) exitAdjustMode();
+
         const previewCanvas = document.getElementById('photo-preview');
         savedOverlay = null;
 
@@ -292,6 +711,9 @@
           onIntermediate(name, data) {
             if (name === 'rectification') {
               cv.imshow(previewCanvas, data.rectified);
+              // Cache rectified image for adjust-mode redraws
+              const ctx = previewCanvas.getContext('2d');
+              previewCanvas._rectifiedImg = ctx.getImageData(0, 0, previewCanvas.width, previewCanvas.height);
             }
             if (name === 'detectGrid' && data.detection?.intersections) {
               savedOverlay = {
@@ -326,10 +748,11 @@
         document.getElementById('photo-hint-rows').value = result.nRows;
         document.getElementById('photo-hint-cols').value = result.nCols;
         updateEdgeToggles(currentElidedEdges);
-        photoDimsEl.hidden   = false;
-        photoEdgesEl.hidden  = false;
-        photoBodyEl.hidden   = false;
-        photoAcceptEl.hidden = false;
+        photoDimsEl.hidden    = false;
+        photoEdgesEl.hidden   = false;
+        photoBodyEl.hidden    = false;
+        photoAcceptEl.hidden  = false;
+        photoAdjustEl.hidden  = false;
       } catch (e) {
         photoStatusEl.textContent = 'Error: ' + e.message;
         console.error(e);
@@ -389,6 +812,7 @@
     }
 
     photoAcceptEl.addEventListener('click', () => {
+      if (adjustGridMode) exitAdjustMode();
       closePhotoModal();
       const sgf = photoResultToSGF(lastPhotoResult, currentElidedEdges);
       textarea.value = sgf;

@@ -527,6 +527,24 @@ button {
   color: #1a1a1a;
 }
 
+#photo-adjust-btn {
+  padding: 0.4rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #444;
+  background: #f0f0ee;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+}
+
+#photo-adjust-btn:hover {
+  background: #e4e4e2;
+}
+
+#photo-preview.adjust-grid {
+  cursor: crosshair;
+}
+
 @media (max-width: 560px) {
   #photo-modal-body {
     flex-direction: column;
