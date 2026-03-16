@@ -142,6 +142,28 @@ function refineQuadWithHough(corners, edges) {
   );
   console.log(`[quad refine] ${parts.join(' ')}`);
 
+  // Reject refinement if it makes opposite sides significantly more unequal.
+  // This prevents snapping to interior board lines when the actual border edge
+  // is broken (e.g. stones occlude part of the border, dropping it below the
+  // Hough threshold).
+  function sideLengths(pts) {
+    const [TL, TR, BR, BL] = pts;
+    return {
+      left:   Math.hypot(BL.x - TL.x, BL.y - TL.y),
+      right:  Math.hypot(BR.x - TR.x, BR.y - TR.y),
+      top:    Math.hypot(TR.x - TL.x, TR.y - TL.y),
+      bottom: Math.hypot(BR.x - BL.x, BR.y - BL.y),
+    };
+  }
+  function oppRatio(a, b) { return Math.min(a, b) / Math.max(a, b); }
+  const orig = sideLengths(corners), ref = sideLengths(refined);
+  const lrOrig = oppRatio(orig.left, orig.right), lrRef = oppRatio(ref.left, ref.right);
+  const tbOrig = oppRatio(orig.top,  orig.bottom), tbRef = oppRatio(ref.top,  ref.bottom);
+  if (lrRef < lrOrig - 0.05 || tbRef < tbOrig - 0.05) {
+    console.log(`[quad refine] rejected: LR ${lrOrig.toFixed(3)}→${lrRef.toFixed(3)} TB ${tbOrig.toFixed(3)}→${tbRef.toFixed(3)}; keeping original`);
+    return corners;
+  }
+
   return refined;
 }
 
