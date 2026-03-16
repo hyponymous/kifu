@@ -39,7 +39,7 @@ function expandCorners(corners, pixels, imgW, imgH) {
 
 // ── Hough-based quad refinement ─────────────────────────────────────────────
 
-function refineQuadWithHough(corners, edges) {
+function refineQuadWithHough(corners, edges, rejectBadRefinement = true) {
   const xs = corners.map(c => c.x), ys = corners.map(c => c.y);
   const pad = 10;
   const x0 = Math.max(0, Math.min(...xs) - pad);
@@ -159,7 +159,7 @@ function refineQuadWithHough(corners, edges) {
   const orig = sideLengths(corners), ref = sideLengths(refined);
   const lrOrig = oppRatio(orig.left, orig.right), lrRef = oppRatio(ref.left, ref.right);
   const tbOrig = oppRatio(orig.top,  orig.bottom), tbRef = oppRatio(ref.top,  ref.bottom);
-  if (lrRef < lrOrig - 0.05 || tbRef < tbOrig - 0.05) {
+  if (rejectBadRefinement && (lrRef < lrOrig - 0.05 || tbRef < tbOrig - 0.05)) {
     console.log(`[quad refine] rejected: LR ${lrOrig.toFixed(3)}→${lrRef.toFixed(3)} TB ${tbOrig.toFixed(3)}→${tbRef.toFixed(3)}; keeping original`);
     return corners;
   }
@@ -169,7 +169,7 @@ function refineQuadWithHough(corners, edges) {
 
 // ── Board detection (core, no setStatus) ────────────────────────────────────
 
-function findBoardCornersCore(src, edges, hintN) {
+function findBoardCornersCore(src, edges, hintN, refineQuadFn = refineQuadWithHough) {
   const imgArea = src.rows * src.cols;
   const dilated   = new cv.Mat();
   const kernel    = cv.Mat.ones(3, 3, cv.CV_8U);
@@ -208,7 +208,7 @@ function findBoardCornersCore(src, edges, hintN) {
   if (bestQuad) {
     const ordered = orderCorners(bestQuad);
     bestQuad.delete();
-    const refined = refineQuadWithHough(ordered, edges);
+    const refined = refineQuadFn(ordered, edges);
     const refinedMat = cv.matFromArray(4, 1, cv.CV_32SC2,
       refined.flatMap(p => [Math.round(p.x), Math.round(p.y)]));
     const qr    = cv.boundingRect(refinedMat);

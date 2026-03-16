@@ -10,6 +10,7 @@
 import './test-helpers/load-cv.js';
 import { loadImage } from './test-helpers/load-image.js';
 import { runPipeline } from './run-pipeline.js';
+import { refineQuadWithHough } from './photo-pipeline.js';
 import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
@@ -35,6 +36,8 @@ if (fixtureFiles.length === 0) {
 
 // Stage-off fns overrides for DI
 const NO_ENHANCE_GRAY = { enhanceGray: (mat, _) => mat };
+const NO_QUAD_REFINE = { refineQuadWithHough: (corners) => corners };
+const NO_REFINE_REJECTION = { refineQuadWithHough: (corners, edges) => refineQuadWithHough(corners, edges, false) };
 const NO_PRE_SNAP = {
   preSnapToCircles: (rows, cols, _circles, intersections) => ({
     snappedRows: rows, snappedCols: cols, snappedIntersections: intersections,
@@ -48,6 +51,8 @@ const EXPERIMENTS = [
   { name: 'baseline', opts: {} },
 
   // Stage ablations
+  { name: 'no-quad-refine',     opts: { fns: NO_QUAD_REFINE } },
+  { name: 'no-refine-rejection', opts: { fns: NO_REFINE_REJECTION } },
   { name: 'no-enhance-gray', opts: { fns: NO_ENHANCE_GRAY } },
   { name: 'no-pre-snap', opts: { fns: NO_PRE_SNAP } },
   { name: 'no-tps', opts: { fns: NO_TPS } },

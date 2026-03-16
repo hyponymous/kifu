@@ -90,7 +90,7 @@ export function runPipeline({ colorMat, grayMat, width, height }, opts = {}) {
       const edges = mat(new cv.Mat());
       cv.GaussianBlur(grayMat, blur, new cv.Size(5, 5), 0);
       cv.Canny(blur, edges, cannyLo, cannyHi);
-      const boardResult = fns.findBoardCornersCore(colorMat, edges, hintN);
+      const boardResult = fns.findBoardCornersCore(colorMat, edges, hintN, fns.refineQuadWithHough);
       const rectCorners = boardResult ? boardResult.corners : [
         { x: 0, y: 0 }, { x: width - 1, y: 0 },
         { x: width - 1, y: height - 1 }, { x: 0, y: height - 1 },
