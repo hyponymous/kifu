@@ -12,7 +12,7 @@ import {
   ransacFilter1D,
   fitCylinder1D, evalCylinderDisp,
   radialPower, sampleDisc, sampleAnnulus,
-} from './photo-pipeline.js';
+} from '../src/photo-pipeline.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

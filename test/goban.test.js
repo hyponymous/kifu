@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parse } from './sgf-parser.js';
-import { replayMain, calculateViewport } from './goban.js';
+import { parse } from '../src/sgf-parser.js';
+import { replayMain, calculateViewport } from '../src/goban.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

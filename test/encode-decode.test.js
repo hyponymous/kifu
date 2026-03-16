@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { encode } from './encode.js';
-import { decode } from './decode.js';
-import { MAX_BYTES } from './sgf-parser.js';
+import { encode } from '../src/encode.js';
+import { decode } from '../src/decode.js';
+import { MAX_BYTES } from '../src/sgf-parser.js';
 
 const SIMPLE = '(;FF[4]GM[1]SZ[19];B[pd];W[dp])';
 const UNICODE = '(;C[日本語コメント])';

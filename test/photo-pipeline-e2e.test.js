@@ -1,7 +1,7 @@
 // photo-pipeline-e2e.test.js — end-to-end tests using fixture ground truth
-import './test-helpers/load-cv.js';
-import { loadImage } from './test-helpers/load-image.js';
-import { runPipeline } from './run-pipeline.js';
+import './helpers/load-cv.js';
+import { loadImage } from './helpers/load-image.js';
+import { runPipeline } from '../src/run-pipeline.js';
 import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';

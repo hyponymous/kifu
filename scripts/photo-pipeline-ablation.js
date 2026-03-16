@@ -7,11 +7,11 @@
 //   node photo-pipeline-ablation.js                    # run all experiments
 //   node photo-pipeline-ablation.js baseline no-tps    # run named subset
 
-import './test-helpers/load-cv.js';
-import { loadImage } from './test-helpers/load-image.js';
-import { runPipeline } from './run-pipeline.js';
-import { refineQuadWithHough } from './photo-pipeline.js';
-import { defaults } from './pipeline-defaults.js';
+import '../test/helpers/load-cv.js';
+import { loadImage } from '../test/helpers/load-image.js';
+import { runPipeline } from '../src/run-pipeline.js';
+import { refineQuadWithHough } from '../src/photo-pipeline.js';
+import { defaults } from '../src/pipeline-defaults.js';
 import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';

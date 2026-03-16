@@ -2,8 +2,8 @@
 // generate-fixtures.js — runs the photo pipeline on images and writes fixture JSON
 // Usage: node generate-fixtures.js fixtures/IMG_0976.jpg [...]
 
-import './test-helpers/load-cv.js';
-import { loadImage } from './test-helpers/load-image.js';
+import '../test/helpers/load-cv.js';
+import { loadImage } from '../test/helpers/load-image.js';
 import { writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
@@ -14,7 +14,7 @@ const {
   dewarpImage, dewarpImageTPS, polyEval,
   ransacFilter, fitTPS, evalTPS,
   buildCombinedGridPoints, buildDetectionFromControlPoints,
-} = await import('./photo-pipeline.js');
+} = await import('../src/photo-pipeline.js');
 
 const files = process.argv.slice(2);
 if (files.length === 0) {

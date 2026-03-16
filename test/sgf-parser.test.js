@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parse, MAX_NODES, MAX_BYTES } from './sgf-parser.js';
+import { parse, MAX_NODES, MAX_BYTES } from '../src/sgf-parser.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
