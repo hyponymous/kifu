@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 // ablation-report.js — reads evals/ablation.eval.jsonl and prints comparison tables
 //
+// TODO: Incorporate failures into aggregate metrics instead of silently excluding them.
+//       Currently a failure (mismatches < 0 / grid detection failure) drops out of the
+//       mean, which makes experiments that break fixtures look *better* on average.
+//       Options: count failures as 0% match, add a "failures" column, or weight the
+//       aggregate so a failure can never improve the summary score.
+//
 // Usage:
 //   node ablation-report.js                        # latest run per experiment
 //   node ablation-report.js --fixture IMG_0983     # per-fixture drill-down

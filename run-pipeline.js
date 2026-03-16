@@ -2,7 +2,9 @@
 // Consumers provide loaded image data; this module handles the pipeline logic.
 
 import * as defaultFns from './photo-pipeline.js';
+import { activeDefaults } from './pipeline-defaults.js';
 const { performance } = globalThis;
+const DEFAULTS = activeDefaults();
 
 /** Apply a 3x3 homography (row-major Float64Array) to a point */
 export function applyHomography(H, x, y) {
@@ -54,17 +56,18 @@ export function computeInversePerspective(rectCorners, rectW, rectH) {
  */
 export function runPipeline({ colorMat, grayMat, width, height }, opts = {}) {
   const fns = { ...defaultFns, ...opts.fns };
-  const cannyLo = opts.cannyLo ?? 50;
-  const cannyHi = opts.cannyHi ?? 125;
-  const tpsLambda = opts.tpsLambda ?? 0.1;
-  const ransacThr = opts.ransacThr ?? 2.9;
-  const reDetect = opts.reDetect ?? true;
-  const combinedGrid = opts.combinedGrid ?? true;
+  const cannyLo = opts.cannyLo ?? DEFAULTS.cannyLo;
+  const cannyHi = opts.cannyHi ?? DEFAULTS.cannyHi;
+  const tpsLambda = opts.tpsLambda ?? DEFAULTS.tpsLambda;
+  const ransacThr = opts.ransacThr ?? DEFAULTS.ransacThr;
+  const reDetect = opts.reDetect ?? DEFAULTS.reDetect;
+  const combinedGrid = opts.combinedGrid ?? DEFAULTS.combinedGrid;
   const hintN = opts.hintN ?? 0;
   const forceRows = opts.forceRows ?? 0;
   const forceCols = opts.forceCols ?? 0;
-  const rpThreshRatio = opts.rpThreshRatio ?? 0.85;
-  const gradFloor = opts.gradFloor ?? 64;
+  const skipTrimEdges = opts.skipTrimEdges ?? DEFAULTS.skipTrimEdges;
+  const rpThreshRatio = opts.rpThreshRatio ?? DEFAULTS.rpThreshRatio;
+  const gradFloor = opts.gradFloor ?? DEFAULTS.gradFloor;
   const lockedRectCorners = opts.rectCorners ?? null;
   const forcedGrid = opts.forcedGrid ?? null;
   const onStage = opts.onStage ?? null;
@@ -166,7 +169,7 @@ export function runPipeline({ colorMat, grayMat, width, height }, opts = {}) {
     // ── Grid detection ────────────────────────────────────────────────────
     const detection = timed('detectGrid', () => {
       const circleSens = 24;
-      return fns.detectGrid(rectGray, hintN, circleSens, { forceRows, forceCols, gridBounds });
+      return fns.detectGrid(rectGray, hintN, circleSens, { forceRows, forceCols, gridBounds, skipTrimEdges });
     });
     if (!detection) return null;
     if (onIntermediate) onIntermediate('detectGrid', { detection });
@@ -250,7 +253,7 @@ export function runPipeline({ colorMat, grayMat, width, height }, opts = {}) {
 
       if (reDetect && finalDetection === detection) {
         const circleSens = 24;
-        const detection2 = fns.detectGrid(dewarpedGray, hintN, circleSens, { forceRows, forceCols });
+        const detection2 = fns.detectGrid(dewarpedGray, hintN, circleSens, { forceRows, forceCols, skipTrimEdges });
         if (detection2
           && detection2.rowPos.length === nRows
           && detection2.colPos.length === nCols) {

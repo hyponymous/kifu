@@ -619,7 +619,7 @@ function findGridBounds(grayMat, cannyLo = 50, cannyHi = 125) {
 
 // ── detectGrid ──────────────────────────────────────────────────────────────
 
-function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols, gridBounds } = {}) {
+function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols, gridBounds, skipTrimEdges } = {}) {
   const W      = grayMat.cols, H = grayMat.rows;
   const refN   = hintN > 0 ? hintN : 19;
   const estStep = W / (refN + 1);
@@ -1003,8 +1003,8 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols, gri
 
   const rowQ = lineQuality(rowResult.snapped, rowRotXs, rowRotYs, stepHint);
   const colQ = lineQuality(colResult.snapped, colRotYs, colRotXs, stepHint);
-  if (!forceRows) trimBadEdges(rowResult, rowQ, stepHint, houghRowPositions, 'row');
-  if (!forceCols) trimBadEdges(colResult, colQ, stepHint, houghColPositions, 'col');
+  if (!forceRows && !skipTrimEdges) trimBadEdges(rowResult, rowQ, stepHint, houghRowPositions, 'row');
+  if (!forceCols && !skipTrimEdges) trimBadEdges(colResult, colQ, stepHint, houghColPositions, 'col');
 
   const uniformRowPos = rowResult.uniform, rowPos = rowResult.snapped;
   const uniformColPos = colResult.uniform, colPos = colResult.snapped;

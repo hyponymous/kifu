@@ -11,6 +11,7 @@ import './test-helpers/load-cv.js';
 import { loadImage } from './test-helpers/load-image.js';
 import { runPipeline } from './run-pipeline.js';
 import { refineQuadWithHough } from './photo-pipeline.js';
+import { defaults } from './pipeline-defaults.js';
 import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
@@ -34,51 +35,38 @@ if (fixtureFiles.length === 0) {
 
 // ── Experiment definitions ──────────────────────────────────────────────────
 
-// Stage-off fns overrides for DI
-const NO_ENHANCE_GRAY = { enhanceGray: (mat, _) => mat };
-const NO_QUAD_REFINE = { refineQuadWithHough: (corners) => corners };
-const NO_REFINE_REJECTION = { refineQuadWithHough: (corners, edges) => refineQuadWithHough(corners, edges, false) };
-const NO_PRE_SNAP = {
-  preSnapToCircles: (rows, cols, _circles, intersections) => ({
-    snappedRows: rows, snappedCols: cols, snappedIntersections: intersections,
-  }),
-};
-const NO_GRID_BOUNDS = { findGridBounds: (gray) => ({ x: 0, y: 0, width: gray.cols, height: gray.rows }) };
-const NO_TPS = { fitTPS: () => null };
-const NO_RANSAC = { ransacFilter: (pts) => pts };
+// TODO: Move fns (DI function overrides) into pipeline-defaults.js so that
+// stage ablations are also defined centrally and auto-generated here.
+
+// Stage-off fns overrides for DI (manual until TODO above is done)
+const FNS_EXPERIMENTS = [
+  { name: 'no-quad-refine',      opts: { fns: { refineQuadWithHough: (corners) => corners } } },
+  { name: 'no-refine-rejection', opts: { fns: { refineQuadWithHough: (corners, edges) => refineQuadWithHough(corners, edges, false) } } },
+  { name: 'no-enhance-gray',     opts: { fns: { enhanceGray: (mat, _) => mat } } },
+  { name: 'no-pre-snap',         opts: { fns: { preSnapToCircles: (rows, cols, _circles, intersections) => ({
+    snappedRows: rows, snappedCols: cols, snappedIntersections: intersections }) } } },
+  { name: 'no-grid-bounds',      opts: { fns: { findGridBounds: (gray) => ({ x: 0, y: 0, width: gray.cols, height: gray.rows }) } } },
+  { name: 'no-tps',              opts: { fns: { fitTPS: () => null } } },
+  { name: 'no-ransac',           opts: { fns: { ransacFilter: (pts) => pts } } },
+];
+
+// Auto-generate parameter experiments from pipeline-defaults.js.
+// Groups variants that share an experiment name (e.g. cannyLo+cannyHi for 'canny-30-80').
+function buildParamExperiments() {
+  const byName = new Map();
+  for (const [key, { variants }] of Object.entries(defaults)) {
+    for (const [expName, value] of Object.entries(variants)) {
+      if (!byName.has(expName)) byName.set(expName, {});
+      byName.get(expName)[key] = value;
+    }
+  }
+  return [...byName.entries()].map(([name, opts]) => ({ name, opts }));
+}
 
 const EXPERIMENTS = [
-  // Baseline
   { name: 'baseline', opts: {} },
-
-  // Stage ablations
-  { name: 'no-quad-refine',     opts: { fns: NO_QUAD_REFINE } },
-  { name: 'no-refine-rejection', opts: { fns: NO_REFINE_REJECTION } },
-  { name: 'no-enhance-gray', opts: { fns: NO_ENHANCE_GRAY } },
-  { name: 'no-pre-snap', opts: { fns: NO_PRE_SNAP } },
-  { name: 'no-tps', opts: { fns: NO_TPS } },
-  { name: 'no-ransac', opts: { fns: NO_RANSAC } },
-  { name: 'no-grid-bounds',  opts: { fns: NO_GRID_BOUNDS } },
-  { name: 'no-re-detection', opts: { reDetect: false } },
-  { name: 'no-combined-grid', opts: { combinedGrid: false } },
-
-  // Canny sweeps
-  { name: 'canny-30-80', opts: { cannyLo: 30, cannyHi: 80 } },
-  { name: 'canny-70-180', opts: { cannyLo: 70, cannyHi: 180 } },
-
-  // TPS lambda sweeps
-  { name: 'tps-lambda-0.01', opts: { tpsLambda: 0.01 } },
-  { name: 'tps-lambda-1.0', opts: { tpsLambda: 1.0 } },
-
-  // RANSAC threshold sweeps
-  { name: 'ransac-1.5', opts: { ransacThr: 1.5 } },
-  { name: 'ransac-5.0', opts: { ransacThr: 5.0 } },
-
-  // Classification parameter sweeps
-  { name: 'rp-thresh-0.70', opts: { rpThreshRatio: 0.70 } },
-  { name: 'rp-thresh-0.95', opts: { rpThreshRatio: 0.95 } },
-  { name: 'grad-floor-32', opts: { gradFloor: 32 } },
-  { name: 'grad-floor-128', opts: { gradFloor: 128 } },
+  ...FNS_EXPERIMENTS,
+  ...buildParamExperiments(),
 ];
 
 // ── Grid error computation ──────────────────────────────────────────────────
