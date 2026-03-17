@@ -3,6 +3,7 @@
 
 import * as defaultFns from './photo-pipeline';
 import { activeDefaults } from './pipeline-defaults';
+import type { ClassifierMode } from './pipeline-defaults';
 import type { Point, Detection, TPSModel, TPSPoint, ClassResult, ElidedEdges, CombinedGrid } from './photo-pipeline';
 
 const { performance } = globalThis;
@@ -14,6 +15,12 @@ export interface ImageData {
   width: number;
   height: number;
 }
+
+/** Synchronous stone classifier injectable (e.g. ONNX, pre-loaded before calling runPipeline). */
+export type IntersectionClassifier = (
+  patches: Uint8Array[],
+  patchSize: number,
+) => Array<'B' | 'W' | '.'>;
 
 export interface PipelineOpts {
   fns?: Partial<typeof defaultFns>;
@@ -29,6 +36,10 @@ export interface PipelineOpts {
   skipTrimEdges?: boolean;
   rpThreshRatio?: number;
   gradFloor?: number;
+  claheEnabled?: boolean;
+  classifierMode?: ClassifierMode;
+  /** When classifierMode is 'onnx', this must be provided (pre-loaded ONNX session wrapper). */
+  classifyIntersections?: IntersectionClassifier;
   rectCorners?: Point[];
   forcedGrid?: { x: number; y: number; r: number; c: number }[];
   onStage?: (name: string, ms: number) => void;
@@ -89,6 +100,9 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
   const skipTrimEdges = opts.skipTrimEdges ?? DEFAULTS.skipTrimEdges;
   const rpThreshRatio = opts.rpThreshRatio ?? DEFAULTS.rpThreshRatio;
   const gradFloor = opts.gradFloor ?? DEFAULTS.gradFloor;
+  const claheEnabled = opts.claheEnabled ?? DEFAULTS.claheEnabled;
+  const classifierMode = opts.classifierMode ?? DEFAULTS.classifierMode;
+  const classifyIntersections = opts.classifyIntersections ?? null;
   const lockedRectCorners = opts.rectCorners ?? null;
   const forcedGrid = opts.forcedGrid ?? null;
   const onStage = opts.onStage ?? null;
@@ -143,7 +157,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
       cv.cvtColor(rectified, rectGrayRaw, cv.COLOR_RGBA2GRAY);
       const rectGrayBlurred = mat(new cv.Mat());
       cv.GaussianBlur(rectGrayRaw, rectGrayBlurred, new cv.Size(3, 3), 0);
-      return mat(fns.enhanceGray(rectGrayBlurred, false));
+      return mat(fns.enhanceGray(rectGrayBlurred, false, { claheEnabled }));
     });
     if (onIntermediate) onIntermediate('enhanceGray', { enhanced: rectGray });
 
@@ -270,7 +284,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
     const dewarpedGray = timed('reDetection', () => {
       const dewarpedGrayRaw = mat(new cv.Mat());
       cv.cvtColor(dewarped, dewarpedGrayRaw, cv.COLOR_RGBA2GRAY);
-      const dewarpedGray = mat(fns.enhanceGray(dewarpedGrayRaw, false));
+      const dewarpedGray = mat(fns.enhanceGray(dewarpedGrayRaw, false, { claheEnabled }));
 
       if (reDetect && finalDetection === detection) {
         const circleSens = 24;
@@ -287,6 +301,23 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
 
     // ── Classification ────────────────────────────────────────────────────
     const classResult = timed('classification', () => {
+      if (classifierMode === 'onnx' && classifyIntersections) {
+        const patches = fns.extractIntersectionPatches(
+          dewarpedGray, finalDetection.intersections, nRows, nCols, fns.ONNX_PATCH_SIZE);
+        const colors = classifyIntersections(patches, fns.ONNX_PATCH_SIZE);
+        const stones = [];
+        let idx = 0;
+        for (let r = 0; r < nRows; r++) {
+          for (let c = 0; c < nCols; c++) {
+            const color = colors[idx++] ?? '.';
+            if (color !== '.') {
+              const pt = finalDetection.intersections[r][c];
+              stones.push({ r, c, color, cx: Math.round(pt.x), cy: Math.round(pt.y) });
+            }
+          }
+        }
+        return { stones } as ClassResult;
+      }
       return fns.classifyStones(dewarpedGray, finalDetection.rowPos, finalDetection.colPos,
         finalDetection.step, finalDetection.rawCircles,
         finalDetection.intersections, true,

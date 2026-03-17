@@ -13,28 +13,36 @@ export interface TunableVariants<T> {
   variants: Record<string, T>;
 }
 
+export type ClassifierMode = 'kmeans' | 'onnx';
+
 export interface PipelineDefaults {
-  cannyLo:       TunableVariants<number>;
-  cannyHi:       TunableVariants<number>;
-  tpsLambda:     TunableVariants<number>;
-  ransacThr:     TunableVariants<number>;
-  reDetect:      TunableVariants<boolean>;
-  combinedGrid:  TunableVariants<boolean>;
-  skipTrimEdges: TunableVariants<boolean>;
-  rpThreshRatio: TunableVariants<number>;
-  gradFloor:     TunableVariants<number>;
+  cannyLo:        TunableVariants<number>;
+  cannyHi:        TunableVariants<number>;
+  tpsLambda:      TunableVariants<number>;
+  ransacThr:      TunableVariants<number>;
+  reDetect:       TunableVariants<boolean>;
+  combinedGrid:   TunableVariants<boolean>;
+  skipTrimEdges:  TunableVariants<boolean>;
+  rpThreshRatio:  TunableVariants<number>;
+  gradFloor:      TunableVariants<number>;
+  claheEnabled:   TunableVariants<boolean>;
+  classifierMode: TunableVariants<ClassifierMode>;
 }
 
 export const defaults: PipelineDefaults = {
-  cannyLo:       { active: 50,    variants: { 'canny-30-80': 30, 'canny-70-180': 70 } },
-  cannyHi:       { active: 125,   variants: { 'canny-30-80': 80, 'canny-70-180': 180 } },
-  tpsLambda:     { active: 0.1,   variants: { 'tps-lambda-0.01': 0.01, 'tps-lambda-1.0': 1.0 } },
-  ransacThr:     { active: 2.9,   variants: { 'ransac-1.5': 1.5, 'ransac-5.0': 5.0 } },
-  reDetect:      { active: true,  variants: { 'no-re-detection': false } },
-  combinedGrid:  { active: true,  variants: { 'no-combined-grid': false } },
-  skipTrimEdges: { active: true,  variants: { 'trim-edges': false } },
-  rpThreshRatio: { active: 0.85,  variants: { 'rp-thresh-0.70': 0.70, 'rp-thresh-0.95': 0.95 } },
-  gradFloor:     { active: 64,    variants: { 'grad-floor-32': 32, 'grad-floor-128': 128 } },
+  cannyLo:        { active: 50,       variants: { 'canny-30-80': 30, 'canny-70-180': 70 } },
+  cannyHi:        { active: 125,      variants: { 'canny-30-80': 80, 'canny-70-180': 180 } },
+  tpsLambda:      { active: 0.1,      variants: { 'tps-lambda-0.01': 0.01, 'tps-lambda-1.0': 1.0 } },
+  ransacThr:      { active: 2.9,      variants: { 'ransac-1.5': 1.5, 'ransac-5.0': 5.0 } },
+  reDetect:       { active: true,     variants: { 'no-re-detection': false } },
+  combinedGrid:   { active: true,     variants: { 'no-combined-grid': false } },
+  skipTrimEdges:  { active: true,     variants: { 'trim-edges': false } },
+  rpThreshRatio:  { active: 0.85,     variants: { 'rp-thresh-0.70': 0.70, 'rp-thresh-0.95': 0.95 } },
+  gradFloor:      { active: 64,       variants: { 'grad-floor-32': 32, 'grad-floor-128': 128 } },
+  // CLAHE is off by default to preserve existing diagram fixture behavior.
+  // Enable via ablation ('clahe' variant) or for real-board photo inputs.
+  claheEnabled:   { active: false,    variants: { 'clahe': true } },
+  classifierMode: { active: 'kmeans', variants: { 'onnx-classifier': 'onnx' } },
 };
 
 export interface ActiveDefaults {
@@ -47,19 +55,23 @@ export interface ActiveDefaults {
   skipTrimEdges: boolean;
   rpThreshRatio: number;
   gradFloor: number;
+  claheEnabled: boolean;
+  classifierMode: ClassifierMode;
 }
 
 /** Return a plain { key: active } object for use as pipeline opts. */
 export function activeDefaults(): ActiveDefaults {
   return {
-    cannyLo:       defaults.cannyLo.active,
-    cannyHi:       defaults.cannyHi.active,
-    tpsLambda:     defaults.tpsLambda.active,
-    ransacThr:     defaults.ransacThr.active,
-    reDetect:      defaults.reDetect.active,
-    combinedGrid:  defaults.combinedGrid.active,
-    skipTrimEdges: defaults.skipTrimEdges.active,
-    rpThreshRatio: defaults.rpThreshRatio.active,
-    gradFloor:     defaults.gradFloor.active,
+    cannyLo:        defaults.cannyLo.active,
+    cannyHi:        defaults.cannyHi.active,
+    tpsLambda:      defaults.tpsLambda.active,
+    ransacThr:      defaults.ransacThr.active,
+    reDetect:       defaults.reDetect.active,
+    combinedGrid:   defaults.combinedGrid.active,
+    skipTrimEdges:  defaults.skipTrimEdges.active,
+    rpThreshRatio:  defaults.rpThreshRatio.active,
+    gradFloor:      defaults.gradFloor.active,
+    claheEnabled:   defaults.claheEnabled.active,
+    classifierMode: defaults.classifierMode.active,
   };
 }

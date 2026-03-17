@@ -1130,7 +1130,17 @@ function detectGrid(grayMat: CvMat, hintN: number, circleSens: number = 21, { fo
 
 // ── Preprocessing ───────────────────────────────────────────────────────────
 
-function enhanceGray(grayMat: CvMat, usePercentileNorm: boolean = true) {
+function enhanceGray(grayMat: CvMat, usePercentileNorm: boolean = true, opts: { claheEnabled?: boolean } = {}) {
+  // CLAHE (Contrast Limited Adaptive Histogram Equalization) works tile-by-tile,
+  // avoiding the over-amplification of noise that global equalization causes on
+  // real board photos with wood grain. Preferred over percentile norm for photos.
+  if (opts.claheEnabled) {
+    const clahe = cv.createCLAHE(2.0, new cv.Size(8, 8));
+    const out = new cv.Mat();
+    clahe.apply(grayMat, out);
+    clahe.delete();
+    return out;
+  }
   if (!usePercentileNorm) {
     const out = new cv.Mat();
     cv.normalize(grayMat, out, 0, 255, cv.NORM_MINMAX, cv.CV_8U);
@@ -2568,6 +2578,50 @@ function buildDetectionFromGrid(gridPoints: { x: number; y: number; r: number; c
   };
 }
 
+// ── Intersection patch extraction for ONNX classifier ───────────────────────
+
+const ONNX_PATCH_SIZE = 32;
+
+/**
+ * Extract fixed-size grayscale patches centered at each board intersection.
+ * Returns a flat array of Uint8Array patches (one per intersection, row-major).
+ * Used as input for the ONNX stone classifier.
+ */
+function extractIntersectionPatches(
+  grayMat: CvMat,
+  intersections: ReadonlyMatrix<Point>,
+  nRows: number,
+  nCols: number,
+  patchSize: number = ONNX_PATCH_SIZE,
+): Uint8Array[] {
+  const W = grayMat.cols, H = grayMat.rows;
+  const half = Math.floor(patchSize / 2);
+  const patches: Uint8Array[] = [];
+  for (let r = 0; r < nRows; r++) {
+    for (let c = 0; c < nCols; c++) {
+      const { x, y } = intersections[r][c];
+      const cx = Math.round(x), cy = Math.round(y);
+      const x0 = cx - half, y0 = cy - half;
+      if (x0 < 0 || y0 < 0 || x0 + patchSize > W || y0 + patchSize > H) {
+        patches.push(new Uint8Array(patchSize * patchSize));
+        continue;
+      }
+      const roi = grayMat.roi(new cv.Rect(x0, y0, patchSize, patchSize));
+      let sized = roi;
+      if (roi.cols !== patchSize || roi.rows !== patchSize) {
+        sized = new cv.Mat();
+        cv.resize(roi, sized, new cv.Size(patchSize, patchSize), 0, 0, cv.INTER_LINEAR);
+        roi.delete();
+      } else {
+        sized = roi;
+      }
+      patches.push(new Uint8Array(sized.data));
+      sized.delete();
+    }
+  }
+  return patches;
+}
+
 // ── Exports ─────────────────────────────────────────────────────────────────
 
 export {
@@ -2612,6 +2666,8 @@ export {
 
   // stone patch extraction
   extractStonePatches,
+  extractIntersectionPatches,
+  ONNX_PATCH_SIZE,
 
   // SGF
   inferBoardSize,

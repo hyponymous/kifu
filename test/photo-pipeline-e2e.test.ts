@@ -9,15 +9,21 @@ import { join } from 'node:path';
 import { execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
-// Discover fixture files
-const fixtureDir = 'fixtures';
-const fixtureFiles = readdirSync(fixtureDir)
-  .filter(f => f.endsWith('.fixture.json'))
-  .map(f => ({
-    name: f.replace('.fixture.json', ''),
-    path: join(fixtureDir, f),
-    data: JSON.parse(readFileSync(join(fixtureDir, f), 'utf8')),
-  }));
+// Discover fixture files in fixtures/ and fixtures/real/
+const fixtureDirs = ['fixtures', 'fixtures/real'];
+const fixtureFiles = fixtureDirs.flatMap(dir => {
+  try {
+    return readdirSync(dir)
+      .filter(f => f.endsWith('.fixture.json'))
+      .map(f => ({
+        name: f.replace('.fixture.json', ''),
+        path: join(dir, f),
+        data: JSON.parse(readFileSync(join(dir, f), 'utf8')),
+      }));
+  } catch {
+    return [];
+  }
+});
 
 if (fixtureFiles.length === 0) {
   console.log('No fixture files found. Run generate-fixtures.js first.');
