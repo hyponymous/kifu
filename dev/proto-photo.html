@@ -164,14 +164,14 @@
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 
   <script type="module">
-    import { parse }         from '../sgf-parser.js';
-    import { renderGoban }   from '../goban.js';
+    import { parse }         from '../sgf-parser';
+    import { renderGoban }   from '../goban';
     import {
       nearestIndex, buildIntersections,
       extractStonePatches,
       generateSGF,
-    } from '../photo-pipeline.js';
-    import { runPipeline as sharedRunPipeline } from '../run-pipeline.js';
+    } from '../photo-pipeline';
+    import { runPipeline as sharedRunPipeline } from '../run-pipeline';
 
     // ── Helpers ────────────────────────────────────────────────────────────────
     function el(id) { return document.getElementById(id); }

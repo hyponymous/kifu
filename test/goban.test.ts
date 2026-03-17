@@ -1,18 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parse } from '../src/sgf-parser.js';
-import { replayMain, calculateViewport } from '../src/goban.js';
+import { parse } from '../src/sgf-parser';
+import { replayMain, calculateViewport } from '../src/goban';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function runBoard(size, sgf) {
+function runBoard(size: number, sgf: string) {
   const tree = parse(sgf)[0];
   const board = new Int8Array(size * size);
   replayMain(board, size, size, tree);
   return board;
 }
 
-function runRect(cols, rows, sgf) {
+function runRect(cols: number, rows: number, sgf: string) {
   const tree = parse(sgf)[0];
   const board = new Int8Array(cols * rows);
   replayMain(board, cols, rows, tree);
@@ -20,7 +20,7 @@ function runRect(cols, rows, sgf) {
 }
 
 // Read board value by SGF coordinate string (e.g. 'pd' → col=15, row=3)
-function at(board, cols, coord) {
+function at(board: Int8Array, cols: number, coord: string) {
   const c = coord.charCodeAt(0) - 97;
   const r = coord.charCodeAt(1) - 97;
   return board[r * cols + c];
@@ -131,7 +131,7 @@ test('rectangular board: captures work across dimensions', () => {
 
 // ── calculateViewport ─────────────────────────────────────────────────────────
 
-function viewport(cols, rows, sgf) {
+function viewport(cols: number, rows: number, sgf: string) {
   const tree = parse(sgf)[0];
   const board = new Int8Array(cols * rows);
   replayMain(board, cols, rows, tree);

@@ -7,11 +7,12 @@
 //   node photo-pipeline-ablation.js                    # run all experiments
 //   node photo-pipeline-ablation.js baseline no-tps    # run named subset
 
-import '../test/helpers/load-cv.js';
-import { loadImage } from '../test/helpers/load-image.js';
-import { runPipeline } from '../src/run-pipeline.js';
-import { refineQuadWithHough } from '../src/photo-pipeline.js';
-import { defaults } from '../src/pipeline-defaults.js';
+import '../test/helpers/load-cv';
+import { loadImage } from '../test/helpers/load-image';
+import { runPipeline } from '../src/run-pipeline';
+import { refineQuadWithHough } from '../src/photo-pipeline';
+import type { Point, Circle, TPSPoint } from '../src/photo-pipeline';
+import { defaults } from '../src/pipeline-defaults';
 import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
@@ -40,14 +41,14 @@ if (fixtureFiles.length === 0) {
 
 // Stage-off fns overrides for DI (manual until TODO above is done)
 const FNS_EXPERIMENTS = [
-  { name: 'no-quad-refine',      opts: { fns: { refineQuadWithHough: (corners) => corners } } },
-  { name: 'no-refine-rejection', opts: { fns: { refineQuadWithHough: (corners, edges) => refineQuadWithHough(corners, edges, false) } } },
-  { name: 'no-enhance-gray',     opts: { fns: { enhanceGray: (mat, _) => mat } } },
-  { name: 'no-pre-snap',         opts: { fns: { preSnapToCircles: (rows, cols, _circles, intersections) => ({
+  { name: 'no-quad-refine',      opts: { fns: { refineQuadWithHough: (corners: Point[]) => corners } } },
+  { name: 'no-refine-rejection', opts: { fns: { refineQuadWithHough: (corners: Point[], edges: CvMat) => refineQuadWithHough(corners, edges, false) } } },
+  { name: 'no-enhance-gray',     opts: { fns: { enhanceGray: (mat: CvMat, _: boolean) => mat } } },
+  { name: 'no-pre-snap',         opts: { fns: { preSnapToCircles: (rows: number[], cols: number[], _circles: Circle[], intersections: Point[][]) => ({
     snappedRows: rows, snappedCols: cols, snappedIntersections: intersections }) } } },
-  { name: 'no-grid-bounds',      opts: { fns: { findGridBounds: (gray) => ({ x: 0, y: 0, width: gray.cols, height: gray.rows }) } } },
+  { name: 'no-grid-bounds',      opts: { fns: { findGridBounds: (gray: CvMat) => ({ x: 0, y: 0, width: gray.cols, height: gray.rows }) } } },
   { name: 'no-tps',              opts: { fns: { fitTPS: () => null } } },
-  { name: 'no-ransac',           opts: { fns: { ransacFilter: (pts) => pts } } },
+  { name: 'no-ransac',           opts: { fns: { ransacFilter: (pts: TPSPoint[]) => pts } } },
 ];
 
 // Auto-generate parameter experiments from pipeline-defaults.js.
@@ -71,7 +72,7 @@ const EXPERIMENTS = [
 
 // ── Grid error computation ──────────────────────────────────────────────────
 
-function computeGridErrors(detected, groundTruth, nRows, nCols) {
+function computeGridErrors(detected: { r: number; c: number; x: number; y: number }[], groundTruth: [number, number][], nRows: number, nCols: number) {
   if (groundTruth.length !== nRows * nCols) return null;
   const errors = [];
   for (const d of detected) {
@@ -118,10 +119,10 @@ async function main() {
   const records = [];
 
   for (const experiment of experiments) {
-    const fixtureResults = {};
-    const matchRates = [];
-    const gridErrorMeans = [];
-    const timings = {};
+    const fixtureResults: Record<string, any> = {};
+    const matchRates: number[] = [];
+    const gridErrorMeans: number[] = [];
+    const timings: Record<string, any[]> = {};
     let failures = 0;
 
     process.stdout.write(`  ${experiment.name.padEnd(22)}`);
@@ -130,7 +131,7 @@ async function main() {
     for (const fixture of fixtureFiles) {
       const image = await loadImage(fixture.data.image);
 
-      const timing = {};
+      const timing: Record<string, any> = {};
       let result;
       try {
         result = runPipeline(image, {
@@ -202,7 +203,7 @@ async function main() {
     const expMs = +(performance.now() - expStart).toFixed(0);
 
     // Aggregate
-    const aggregate = {
+    const aggregate: Record<string, any> = {
       matchRateMean: matchRates.length > 0
         ? +(matchRates.reduce((s, v) => s + v, 0) / matchRates.length).toFixed(4)
         : 0,
@@ -212,9 +213,9 @@ async function main() {
       aggregate.gridErrorMean = +(gridErrorMeans.reduce((s, v) => s + v, 0) / gridErrorMeans.length).toFixed(2);
     }
 
-    const timingMean = {};
+    const timingMean: Record<string, number> = {};
     for (const [stage, vals] of Object.entries(timings)) {
-      timingMean[stage] = +(vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(1);
+      timingMean[stage] = +(vals.reduce((s: number, v: number) => s + v, 0) / vals.length).toFixed(1);
     }
     aggregate.timingMean = timingMean;
 

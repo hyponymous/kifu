@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const sharp = require('sharp');
 
-export async function loadImage(filePath) {
+export async function loadImage(filePath: string) {
   const img = sharp(filePath).rotate(); // auto-rotate per EXIF
   const { width, height } = await img.metadata();
   const rgba = await img.ensureAlpha().raw().toBuffer({ resolveWithObject: true });

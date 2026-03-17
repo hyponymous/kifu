@@ -4,16 +4,19 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test 'test/*.test.js'",
-    "test:unit": "node --test test/photo-pipeline.test.js",
-    "test:e2e": "node --test test/photo-pipeline-e2e.test.js",
-    "generate-fixtures": "node scripts/generate-fixtures.js",
-    "ablation": "node scripts/photo-pipeline-ablation.js",
-    "ablation:report": "node scripts/ablation-report.js"
+    "test": "node --experimental-transform-types --loader ./test/helpers/resolve-ts.mjs --test 'test/*.test.ts'",
+    "test:unit": "node --experimental-transform-types --loader ./test/helpers/resolve-ts.mjs --test test/photo-pipeline.test.ts",
+    "test:e2e": "node --experimental-transform-types --loader ./test/helpers/resolve-ts.mjs --test test/photo-pipeline-e2e.test.ts",
+    "generate-fixtures": "node --experimental-transform-types --loader ./test/helpers/resolve-ts.mjs scripts/generate-fixtures.ts",
+    "ablation": "node --experimental-transform-types --loader ./test/helpers/resolve-ts.mjs scripts/photo-pipeline-ablation.ts",
+    "ablation:report": "node --experimental-transform-types scripts/ablation-report.ts",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/node": "^25.5.0",
     "opencv-wasm": "4.3.0-10",
     "sharp": "^0.33.0",
+    "typescript": "^5.9.3",
     "vite": "^8.0.0"
   }
 }

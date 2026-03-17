@@ -1,11 +1,98 @@
-// photo-pipeline.js — pure computation functions for the photo→tsumego pipeline
+// photo-pipeline.ts — pure computation functions for the photo→tsumego pipeline
 // Extracted from proto-photo.html for reuse and testing.
 // All functions take data in and return data out; no DOM or canvas access.
 // OpenCV (cv) is assumed to be available as a global.
 
+// ── Types ────────────────────────────────────────────────────────────────────
+
+export interface Point {
+  x: number;
+  y: number;
+}
+
+export interface Circle extends Point {
+  r: number;
+}
+
+export interface TPSPoint {
+  x: number;
+  y: number;
+  target: number;
+}
+
+export interface TPSModel {
+  norm: TPSPoint[];
+  w: Float64Array | number[];
+  a: number[];
+  minX: number;
+  scX: number;
+  minY: number;
+  scY: number;
+}
+
+export interface HoughLine { rho: number; theta: number; axis: 'row' | 'col' }
+export interface Cluster { pos: number; count: number }
+
+export interface Detection {
+  rowPos: number[];
+  colPos: number[];
+  uniformRowPos: number[];
+  uniformColPos: number[];
+  step: number;
+  rawCircles: Circle[];
+  lineHPos: number[];
+  lineVPos: number[];
+  rowAngle: number;
+  colAngle: number;
+  harrisCorners: Point[];
+  intersections: Point[][];
+  medRadius?: number | null;
+  circleMinR?: number;
+  circleMaxR?: number;
+  houghLines?: HoughLine[];
+  houghRowCentroids?: Cluster[];
+  houghColCentroids?: Cluster[];
+}
+
+export interface ClassResult {
+  stones: { r: number; c: number; color: string; mean?: number; rp?: number }[];
+  threshold?: number;
+}
+
+export interface ElidedEdges {
+  top: boolean;
+  bottom: boolean;
+  left: boolean;
+  right: boolean;
+}
+
+export interface CylinderModel {
+  R: number;
+  yc: number;
+}
+
+export interface PiecewiseModel {
+  pieces: CylinderModel[];
+  breakpoints: number[];
+  blendW: number;
+}
+
+export interface CombinedGrid {
+  gridY: TPSPoint[];
+  gridX: TPSPoint[];
+  nRext: number;
+  nCext: number;
+  hasBorder: boolean;
+}
+
+export type ReadonlyMatrix<T> = readonly (readonly T[])[];
+
+// GridBounds is a CvRect — returned by findGridBounds / cv.boundingRect
+type GridBounds = CvRect;
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function median(arr) {
+function median(arr: readonly number[]) {
   if (!arr.length) return 0;
   const s = arr.slice().sort((a, b) => a - b);
   return s[Math.floor(s.length / 2)];
@@ -13,7 +100,7 @@ function median(arr) {
 
 // ── Corner ordering & expansion ─────────────────────────────────────────────
 
-function orderCorners(quad) {
+function orderCorners(quad: CvMat) {
   const pts = Array.from({ length: 4 }, (_, i) => ({
     x: quad.data32S[i * 2],
     y: quad.data32S[i * 2 + 1],
@@ -24,7 +111,7 @@ function orderCorners(quad) {
   return [tl, mid[1], br, mid[0]]; // TL TR BR BL
 }
 
-function expandCorners(corners, pixels, imgW, imgH) {
+function expandCorners(corners: readonly Point[], pixels: number, imgW: number, imgH: number) {
   const cx = corners.reduce((s, p) => s + p.x, 0) / 4;
   const cy = corners.reduce((s, p) => s + p.y, 0) / 4;
   return corners.map(p => {
@@ -39,7 +126,7 @@ function expandCorners(corners, pixels, imgW, imgH) {
 
 // ── Hough-based quad refinement ─────────────────────────────────────────────
 
-function refineQuadWithHough(corners, edges, rejectBadRefinement = true) {
+function refineQuadWithHough(corners: readonly Point[], edges: CvMat, rejectBadRefinement: boolean = true) {
   const xs = corners.map(c => c.x), ys = corners.map(c => c.y);
   const pad = 10;
   const x0 = Math.max(0, Math.min(...xs) - pad);
@@ -63,23 +150,23 @@ function refineQuadWithHough(corners, edges, rejectBadRefinement = true) {
   const edgeNames = ['top','right','bottom','left'];
   const maxDist = 0.15 * Math.max(cropW, cropH);
 
-  function perpDist(px, py, rho, theta) {
+  function perpDist(px: number, py: number, rho: number, theta: number) {
     return Math.abs(px * Math.cos(theta) + py * Math.sin(theta) - rho);
   }
 
-  function segAngle(p1, p2) {
+  function segAngle(p1: Point, p2: Point) {
     let a = Math.atan2(p2.y - p1.y, p2.x - p1.x);
     while (a < 0) a += Math.PI;
     while (a >= Math.PI) a -= Math.PI;
     return a;
   }
 
-  function angleDiff(a, b) {
+  function angleDiff(a: number, b: number) {
     let d = Math.abs(a - b) % Math.PI;
     return d > Math.PI / 2 ? Math.PI - d : d;
   }
 
-  const matchedLines = [];
+  const matchedLines: ({ rho: number; theta: number } | null)[] = [];
   for (let ei = 0; ei < 4; ei++) {
     const [i0, i1] = edgePairs[ei];
     const p1 = local[i0], p2 = local[i1];
@@ -114,7 +201,7 @@ function refineQuadWithHough(corners, edges, rejectBadRefinement = true) {
 
   const edgeForCorner = [[3,0],[0,1],[1,2],[2,3]];
 
-  function intersectHoughLines(l1, l2) {
+  function intersectHoughLines(l1: { rho: number; theta: number }, l2: { rho: number; theta: number }) {
     const c1 = Math.cos(l1.theta), s1 = Math.sin(l1.theta);
     const c2 = Math.cos(l2.theta), s2 = Math.sin(l2.theta);
     const det = c1 * s2 - c2 * s1;
@@ -125,10 +212,10 @@ function refineQuadWithHough(corners, edges, rejectBadRefinement = true) {
     };
   }
 
-  const refined = [];
+  const refined: Point[] = [];
   for (let ci = 0; ci < 4; ci++) {
     const [e1, e2] = edgeForCorner[ci];
-    const pt = intersectHoughLines(matchedLines[e1], matchedLines[e2]);
+    const pt = intersectHoughLines(matchedLines[e1]!, matchedLines[e2]!);
     if (!pt) {
       console.log(`[quad refine] degenerate intersection at ${['TL','TR','BR','BL'][ci]}; keeping original`);
       return corners;
@@ -146,7 +233,7 @@ function refineQuadWithHough(corners, edges, rejectBadRefinement = true) {
   // This prevents snapping to interior board lines when the actual border edge
   // is broken (e.g. stones occlude part of the border, dropping it below the
   // Hough threshold).
-  function sideLengths(pts) {
+  function sideLengths(pts: readonly Point[]) {
     const [TL, TR, BR, BL] = pts;
     return {
       left:   Math.hypot(BL.x - TL.x, BL.y - TL.y),
@@ -155,7 +242,7 @@ function refineQuadWithHough(corners, edges, rejectBadRefinement = true) {
       bottom: Math.hypot(BR.x - BL.x, BR.y - BL.y),
     };
   }
-  function oppRatio(a, b) { return Math.min(a, b) / Math.max(a, b); }
+  function oppRatio(a: number, b: number) { return Math.min(a, b) / Math.max(a, b); }
   const orig = sideLengths(corners), ref = sideLengths(refined);
   const lrOrig = oppRatio(orig.left, orig.right), lrRef = oppRatio(ref.left, ref.right);
   const tbOrig = oppRatio(orig.top,  orig.bottom), tbRef = oppRatio(ref.top,  ref.bottom);
@@ -169,7 +256,7 @@ function refineQuadWithHough(corners, edges, rejectBadRefinement = true) {
 
 // ── Board detection (core, no setStatus) ────────────────────────────────────
 
-function findBoardCornersCore(src, edges, hintN, refineQuadFn = refineQuadWithHough) {
+function findBoardCornersCore(src: CvMat, edges: CvMat, hintN: number, refineQuadFn: (corners: readonly Point[], edges: CvMat, rejectBadRefinement?: boolean) => readonly Point[] = refineQuadWithHough) {
   const imgArea = src.rows * src.cols;
   const dilated   = new cv.Mat();
   const kernel    = cv.Mat.ones(3, 3, cv.CV_8U);
@@ -225,7 +312,7 @@ function findBoardCornersCore(src, edges, hintN, refineQuadFn = refineQuadWithHo
 
 // ── Grid fitting helpers ────────────────────────────────────────────────────
 
-function clusterPositions(positions, tol = 8) {
+function clusterPositions(positions: readonly number[], tol: number = 8) {
   if (positions.length === 0) return [];
   const sorted = positions.slice().sort((a, b) => a - b);
   const merged = [];
@@ -245,7 +332,7 @@ function clusterPositions(positions, tol = 8) {
   return merged;
 }
 
-function medianStep(positions) {
+function medianStep(positions: readonly number[]) {
   const clusters = clusterPositions(positions);
   if (clusters.length < 2) return null;
   const diffs = [];
@@ -253,7 +340,7 @@ function medianStep(positions) {
   return median(diffs);
 }
 
-function nearestNeighborStep(points) {
+function nearestNeighborStep(points: readonly Point[]) {
   if (points.length < 2) return null;
   const nnDists = [];
   for (let i = 0; i < points.length; i++) {
@@ -269,7 +356,7 @@ function nearestNeighborStep(points) {
   return nnDists[Math.floor(nnDists.length / 2)];
 }
 
-function gridAlignmentScore(projections, step) {
+function gridAlignmentScore(projections: readonly number[], step: number) {
   if (projections.length === 0 || step <= 0) return 1;
   let sumCos = 0, sumSin = 0;
   for (const p of projections) {
@@ -282,8 +369,8 @@ function gridAlignmentScore(projections, step) {
   return 1 - R;
 }
 
-function findGridAngle(points, step, cx, cy) {
-  function rotateAndScore(pts, angleDeg) {
+function findGridAngle(points: readonly Point[], step: number, cx: number, cy: number) {
+  function rotateAndScore(pts: readonly Point[], angleDeg: number) {
     const rad = angleDeg * Math.PI / 180;
     const cos = Math.cos(rad), sin = Math.sin(rad);
     const xs = [], ys = [];
@@ -295,7 +382,7 @@ function findGridAngle(points, step, cx, cy) {
     return { score: gridAlignmentScore(xs, step) + gridAlignmentScore(ys, step), xs, ys };
   }
 
-  let bestAngle = 0, bestScore = Infinity, bestXs = [], bestYs = [];
+  let bestAngle = 0, bestScore = Infinity, bestXs: number[] = [], bestYs: number[] = [];
   for (let a = -15; a <= 15; a += 0.5) {
     const { score } = rotateAndScore(points, a);
     if (score < bestScore) { bestScore = score; bestAngle = a; }
@@ -318,7 +405,7 @@ function findGridAngle(points, step, cx, cy) {
 
 // ── Weighted least-squares quadratic fit ─────────────────────────────────────
 
-function fitWeightedQuadratic(xs, ys, ws) {
+function fitWeightedQuadratic(xs: readonly number[], ys: readonly number[], ws: readonly number[]) {
   const n = xs.length;
   if (n === 0) return [0, 0, 0];
   if (n === 1) return [ys[0], 0, 0];
@@ -367,7 +454,7 @@ function fitWeightedQuadratic(xs, ys, ws) {
 
 // ── fitGrid ─────────────────────────────────────────────────────────────────
 
-function fitGrid(positions, hintN, stepHint = null, label = '', clusterTol = 8) {
+function fitGrid(positions: readonly number[], hintN: number, stepHint: number | null = null, label: string = '', clusterTol: number = 8) {
   if (positions.length < 2) return null;
 
   const clusters = clusterPositions(positions, clusterTol);
@@ -399,7 +486,7 @@ function fitGrid(positions, hintN, stepHint = null, label = '', clusterTol = 8) 
     const medGap = median(gaps);
     if (medGap < refStep * 0.65) {
       const anchor = confident.reduce((a, b) => a.count > b.count ? a : b).pos;
-      const phaseOf = c => {
+      const phaseOf = (c: { pos: number; count: number }) => {
         const frac = (c.pos - anchor) / refStep;
         return Math.abs(frac - Math.round(frac)) < 0.25 ? 0 : 1;
       };
@@ -435,7 +522,8 @@ function fitGrid(positions, hintN, stepHint = null, label = '', clusterTol = 8) 
 
   const MODEL_TOL = 0.35;
   let fitPoints = inliers.map(p => ({ idx: p.idx, pos: p.pos, weight: p.count }));
-  let qCoeffs, evalModel, binned;
+  // All three are set on iter 0 and remain set; ! below is safe (loop invariant).
+  let qCoeffs: number[] | undefined, evalModel: ((idx: number) => number) | undefined, binned: Map<number, { totalPos: number; totalWeight: number }> | undefined;
 
   for (let iter = 0; iter < 4; iter++) {
     qCoeffs = fitWeightedQuadratic(
@@ -443,7 +531,7 @@ function fitGrid(positions, hintN, stepHint = null, label = '', clusterTol = 8) 
       fitPoints.map(p => p.pos),
       fitPoints.map(p => p.weight),
     );
-    evalModel = idx => qCoeffs[0] + qCoeffs[1] * idx + qCoeffs[2] * idx * idx;
+    evalModel = (idx: number) => qCoeffs![0] + qCoeffs![1] * idx + qCoeffs![2] * idx * idx;
 
     binned = new Map();
     for (const pos of positions) {
@@ -476,7 +564,7 @@ function fitGrid(positions, hintN, stepHint = null, label = '', clusterTol = 8) 
     if (converged) break;
   }
 
-  const populatedIndices = [...binned.keys()].sort((a, b) => a - b);
+  const populatedIndices = [...binned!.keys()].sort((a, b) => a - b); // safe: loop ran ≥1 iter
   if (populatedIndices.length < 2) return null;
 
   let bestRunStart = 0, bestRunLen = 1;
@@ -497,8 +585,8 @@ function fitGrid(positions, hintN, stepHint = null, label = '', clusterTol = 8) 
   const idxLast  = populatedIndices[bestRunStart + bestRunLen - 1];
   const effectiveN = idxLast - idxFirst + 1;
 
-  const chainFirst = evalModel(idxFirst);
-  const chainLast  = evalModel(idxLast);
+  const chainFirst = evalModel!(idxFirst); // safe: loop invariant (set on iter 0)
+  const chainLast  = evalModel!(idxLast);
   const avgStep = effectiveN > 1 ? (chainLast - chainFirst) / (effectiveN - 1) : refStep;
 
   const n = hintN > 0 ? hintN : effectiveN;
@@ -512,36 +600,36 @@ function fitGrid(positions, hintN, stepHint = null, label = '', clusterTol = 8) 
     const extra = n - effectiveN;
     startIdx = idxFirst - Math.floor(extra / 2);
   }
-  const uniform = Array.from({ length: n }, (_, i) => evalModel(startIdx + i));
+  const uniform = Array.from({ length: n }, (_, i) => evalModel!(startIdx + i)); // safe: loop invariant
 
   const snapped = uniform.map((expected, i) => {
     const idx = startIdx + i;
-    const b = binned.get(idx);
+    const b = binned!.get(idx);
     return b ? b.totalPos / b.totalWeight : expected;
   });
 
   if (label) {
     const binnedSummary = populatedIndices.slice(bestRunStart, bestRunStart + bestRunLen)
       .map(idx => {
-        const b = binned.get(idx);
+        const b = binned!.get(idx);
         return `${idx}:${b ? b.totalWeight : 0}`;
       });
     console.log(`[fitGrid ${label}] ${positions.length} votes → ${clusters.length} clusters → ${inliers.length} inliers → ${populatedIndices.length} model bins`);
-    console.log(`[fitGrid ${label}] refStep=${refStep.toFixed(1)} model=[${qCoeffs.map(c => c.toFixed(4))}]`);
+    console.log(`[fitGrid ${label}] refStep=${refStep.toFixed(1)} model=[${qCoeffs!.map(c => c.toFixed(4))}]`); // safe: loop invariant
     console.log(`[fitGrid ${label}] run=[${idxFirst}..${idxLast}] effectiveN=${effectiveN} bins=${JSON.stringify(binnedSummary)} n=${n}`);
   }
 
   const binCounts = uniform.map((_, i) => {
-    const b = binned.get(startIdx + i);
+    const b = binned!.get(startIdx + i);
     return b ? b.totalWeight : 0;
   });
 
-  return { uniform, snapped, avgStep, chainFirst, chainLast, evalModel, startIdx, binCounts };
+  return { uniform, snapped, avgStep, chainFirst, chainLast, evalModel: evalModel!, startIdx, binCounts }; // safe: loop invariant
 }
 
 // ── Build 2D intersection grid ──────────────────────────────────────────────
 
-function buildIntersections(rowPos, colPos, rowAngle, colAngle, W, H) {
+function buildIntersections(rowPos: number[], colPos: number[], rowAngle: number, colAngle: number, W: number, H: number) {
   const rA = rowAngle * Math.PI / 180;
   const cA = colAngle * Math.PI / 180;
   const sinR = Math.sin(rA), cosR = Math.cos(rA);
@@ -565,7 +653,7 @@ function buildIntersections(rowPos, colPos, rowAngle, colAngle, W, H) {
 
 // ── Find tight board bounds via edge contours ───────────────────────────────
 
-function findGridBounds(grayMat, cannyLo = 50, cannyHi = 125) {
+function findGridBounds(grayMat: CvMat, cannyLo: number = 50, cannyHi: number = 125) {
   const W = grayMat.cols, H = grayMat.rows;
   const cx = W / 2, cy = H / 2;
 
@@ -619,7 +707,7 @@ function findGridBounds(grayMat, cannyLo = 50, cannyHi = 125) {
 
 // ── detectGrid ──────────────────────────────────────────────────────────────
 
-function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols, gridBounds, skipTrimEdges } = {}) {
+function detectGrid(grayMat: CvMat, hintN: number, circleSens: number = 21, { forceRows, forceCols, gridBounds, skipTrimEdges }: { forceRows?: number; forceCols?: number; gridBounds?: GridBounds | null; skipTrimEdges?: boolean } = {}): Detection | null {
   const W      = grayMat.cols, H = grayMat.rows;
   const refN   = hintN > 0 ? hintN : 19;
   const estStep = W / (refN + 1);
@@ -637,7 +725,7 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols, gri
 
   // Filter features by grid bounds (tight board rectangle) if provided
   const inBounds = gridBounds
-    ? (x, y) => x >= gridBounds.x && x <= gridBounds.x + gridBounds.width &&
+    ? (x: number, y: number) => x >= gridBounds.x && x <= gridBounds.x + gridBounds.width &&
                  y >= gridBounds.y && y <= gridBounds.y + gridBounds.height
     : () => true;
   if (gridBounds) {
@@ -659,7 +747,7 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols, gri
 
   const sweepLo = W / 30, sweepHi = W / 8;
   const nCandidates = 6;
-  let bestCircles = [], bestSweepStep = estStep;
+  let bestCircles: Circle[] = [], bestSweepStep = estStep;
   const targetMaxR = 25;
 
   for (let ci = 0; ci < nCandidates; ci++) {
@@ -760,9 +848,9 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols, gri
     }
   }
 
-  const medDev = (arr) => {
+  const medDev = (arr: number[]) => {
     if (!arr.length) return null;
-    const s = arr.slice().sort((a, b) => a - b);
+    const s = arr.slice().sort((a: number, b: number) => a - b);
     return s[Math.floor(s.length / 2)];
   };
   const vMed = medDev(vDeviations);
@@ -776,8 +864,8 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols, gri
   const cornerStep = radiusStep || estStep;
   const roughStep = nnStep || cornerStep;
 
-  function sweepAxis(seedDeg, range, step, points, cx, cy, axis) {
-    let bestAngle = seedDeg, bestScore = Infinity, bestXs = [], bestYs = [];
+  function sweepAxis(seedDeg: number, range: number, step: number, points: Point[], cx: number, cy: number, axis: string) {
+    let bestAngle = seedDeg, bestScore = Infinity, bestXs: number[] = [], bestYs: number[] = [];
     for (let a = seedDeg - range; a <= seedDeg + range; a += 0.05) {
       const r = a * Math.PI / 180;
       const cos = Math.cos(r), sin = Math.sin(r);
@@ -799,7 +887,7 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols, gri
   if (houghRowAngleDeg != null) {
     const sweepStep = cornerStep || roughStep;
     const rowResult = sweepAxis(houghRowAngleDeg, 2, sweepStep, harrisCorners, W / 2, H / 2, 'row');
-    const colResult = sweepAxis(houghColAngleDeg, 2, sweepStep, harrisCorners, W / 2, H / 2, 'col');
+    const colResult = sweepAxis(houghColAngleDeg!, 2, sweepStep, harrisCorners, W / 2, H / 2, 'col'); // safe: houghColAngleDeg is non-null under the same condition as houghRowAngleDeg (both derive from hMed/vMed)
     rowAngle = rowResult.angle; rowRotXs = rowResult.xs; rowRotYs = rowResult.ys;
     colAngle = colResult.angle; colRotXs = colResult.xs; colRotYs = colResult.ys;
     console.log(`[findGridAngle] hough-seeded rowAngle=${rowAngle.toFixed(2)}° score=${rowResult.score.toFixed(4)} colAngle=${colAngle.toFixed(2)}° score=${colResult.score.toFixed(4)} sweepStep=${sweepStep.toFixed(1)}`);
@@ -814,7 +902,7 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols, gri
   }
 
   // 5. Compute step hint (needed for Hough clustering below)
-  let stepHint;
+  let stepHint: number;
   if (radiusStep) {
     stepHint = radiusStep;
   } else {
@@ -832,7 +920,7 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols, gri
   let houghH = 0, houghV = 0;
   const rawHoughRows = [], rawHoughCols = [];
   const houghRowPositions = [], houghColPositions = [];
-  const houghLines = [];
+  const houghLines: HoughLine[] = [];
   for (let i = 0; i < linesMat.rows; i++) {
     const rho   = linesMat.data32F[i * 2];
     const theta = linesMat.data32F[i * 2 + 1];
@@ -906,7 +994,7 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols, gri
     }
   }
 
-  function refineModel(result, harrisCoords) {
+  function refineModel(result: { evalModel: (idx: number) => number; startIdx: number; uniform: number[]; snapped: number[]; binCounts: number[] }, harrisCoords: number[]) {
     const { evalModel, startIdx } = result;
     const n = result.uniform.length;
     const bins = new Map();
@@ -940,7 +1028,7 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols, gri
     }
     if (fitIdxs.length < 3) return;
     const newCoeffs = fitWeightedQuadratic(fitIdxs, fitPos, fitW);
-    const newEval = idx => newCoeffs[0] + newCoeffs[1] * idx + newCoeffs[2] * idx * idx;
+    const newEval = (idx: number) => newCoeffs[0] + newCoeffs[1] * idx + newCoeffs[2] * idx * idx;
     for (let i = 0; i < n; i++) {
       result.uniform[i] = newEval(startIdx + i);
       const idx = startIdx + i;
@@ -957,9 +1045,9 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols, gri
   refineModel(colResult, filteredColRotX);
 
   // Per-line quality trimming
-  function lineQuality(linePositions, alongCoords, perpCoords, step) {
+  function lineQuality(linePositions: number[], alongCoords: number[], perpCoords: number[], step: number) {
     const tol = step * 0.3;
-    return linePositions.map(lp => {
+    return linePositions.map((lp: number) => {
       const along = [];
       for (let i = 0; i < perpCoords.length; i++) {
         if (Math.abs(perpCoords[i] - lp) < tol) along.push(alongCoords[i]);
@@ -972,13 +1060,13 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols, gri
     });
   }
 
-  function trimBadEdges(result, quality, step, houghPositions, label) {
-    const hasHough = (pos) =>
-      houghPositions.some(hp => Math.abs(hp - pos) < step * 0.3);
+  function trimBadEdges(result: { uniform: number[]; snapped: number[]; startIdx: number; binCounts: number[] }, quality: { n: number; medGap: number }[], step: number, houghPositions: number[], label: string) {
+    const hasHough = (pos: number) =>
+      houghPositions.some((hp: number) => Math.abs(hp - pos) < step * 0.3);
     const counts = result.binCounts;
     const interiorCounts = counts.slice(1, -1);
     const medVotes = interiorCounts.length > 0 ? median(interiorCounts) : 0;
-    const isGood = (q, pos, idx) => {
+    const isGood = (q: { n: number; medGap: number }, pos: number, idx: number) => {
       if (hasHough(pos)) return true;
       if (counts[idx] < medVotes * 0.25) return false;
       if (q.n < 3) return false;
@@ -1042,7 +1130,7 @@ function detectGrid(grayMat, hintN, circleSens = 21, { forceRows, forceCols, gri
 
 // ── Preprocessing ───────────────────────────────────────────────────────────
 
-function enhanceGray(grayMat, usePercentileNorm = true) {
+function enhanceGray(grayMat: CvMat, usePercentileNorm: boolean = true) {
   if (!usePercentileNorm) {
     const out = new cv.Mat();
     cv.normalize(grayMat, out, 0, 255, cv.NORM_MINMAX, cv.CV_8U);
@@ -1062,7 +1150,7 @@ function enhanceGray(grayMat, usePercentileNorm = true) {
 
 // ── Classification helpers ──────────────────────────────────────────────────
 
-function radialPower(gx, gy, W, H, cx, cy, rIn, rOut, gradFloor, sinMask = 0) {
+function radialPower(gx: Float32Array, gy: Float32Array, W: number, H: number, cx: number, cy: number, rIn: number, rOut: number, gradFloor: number, sinMask: number = 0) {
   const ir   = Math.ceil(rOut);
   const in2  = rIn * rIn, out2 = rOut * rOut;
   const sm2  = sinMask * sinMask;
@@ -1090,7 +1178,7 @@ function radialPower(gx, gy, W, H, cx, cy, rIn, rOut, gradFloor, sinMask = 0) {
   return totSum > 0 ? radSum / totSum : 0;
 }
 
-function sampleDisc(gray, W, H, cx, cy, r) {
+function sampleDisc(gray: Uint8Array, W: number, H: number, cx: number, cy: number, r: number) {
   const ir = Math.ceil(r), r2 = r * r;
   let sum = 0, n = 0;
   for (let dy = -ir; dy <= ir; dy++) {
@@ -1104,7 +1192,7 @@ function sampleDisc(gray, W, H, cx, cy, r) {
   return n ? sum / n : 128;
 }
 
-function sampleAnnulus(gray, W, H, cx, cy, rIn, rOut) {
+function sampleAnnulus(gray: Uint8Array, W: number, H: number, cx: number, cy: number, rIn: number, rOut: number) {
   const ir = Math.ceil(rOut);
   const in2 = rIn * rIn, out2 = rOut * rOut;
   let sum = 0, n = 0;
@@ -1120,7 +1208,7 @@ function sampleAnnulus(gray, W, H, cx, cy, rIn, rOut) {
   return n ? sum / n : 128;
 }
 
-function kmeans2(values, seedLo, seedHi) {
+function kmeans2(values: number[], seedLo: number, seedHi: number) {
   let c0 = seedLo, c1 = seedHi;
   const labels = new Int32Array(values.length);
   for (let iter = 0; iter < 20; iter++) {
@@ -1146,12 +1234,12 @@ function kmeans2(values, seedLo, seedHi) {
 // Returns { stones, grayCache, dbgInfo }
 // useHoughW: whether to promote empty intersections with nearby circle detection to W
 
-function classifyStones(grayMat, rowPos, colPos, step, rawCircles, intersections, useHoughW = false, { rpThreshRatio = 0.85, gradFloor = 64 } = {}) {
+function classifyStones(grayMat: CvMat, rowPos: readonly number[], colPos: readonly number[], step: number, rawCircles: Circle[], intersections: ReadonlyMatrix<Point>, useHoughW: boolean = false, { rpThreshRatio = 0.85, gradFloor = 64 }: { rpThreshRatio?: number; gradFloor?: number } = {}) {
   const W    = grayMat.cols, H = grayMat.rows;
   const gray = grayMat.data;
   const grayCache = { data: new Uint8Array(gray), W, H };
 
-  const sortedR = rawCircles.map(c => c.r).sort((a, b) => a - b);
+  const sortedR = rawCircles.map((c: Circle) => c.r).sort((a: number, b: number) => a - b);
   const medR    = sortedR.length ? sortedR[Math.floor(sortedR.length / 2)] : null;
   const stoneR  = medR ?? (step * 0.5);
 
@@ -1171,8 +1259,8 @@ function classifyStones(grayMat, rowPos, colPos, step, rawCircles, intersections
   const snapRlo  = stoneR * 0.75, snapRhi = stoneR * 1.25;
 
   const pts   = [];
-  const rpArr = [];
-  const bdArr = [];
+  const rpArr: number[] = [];
+  const bdArr: number[] = [];
   for (let r = 0; r < rowPos.length; r++) {
     for (let c = 0; c < colPos.length; c++) {
       let cx = Math.round(intersections[r][c].x);
@@ -1252,7 +1340,7 @@ function classifyStones(grayMat, rowPos, colPos, step, rawCircles, intersections
 
 // ── Perspective warp ────────────────────────────────────────────────────────
 
-function rectifyBoard(src, corners, outW, outH) {
+function rectifyBoard(src: CvMat, corners: readonly Point[], outW: number, outH: number) {
   const srcPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
     corners[0].x, corners[0].y,
     corners[1].x, corners[1].y,
@@ -1283,8 +1371,8 @@ function rectifyBoard(src, corners, outW, outH) {
  * @param {Array}  stones   - stone objects from classifyStones
  * @param {number} step     - grid step in pixels
  */
-function extractStonePatches(grayMat, stones, step, opts = {}) {
-  const patches = [];
+function extractStonePatches(grayMat: CvMat, stones: { r: number; c: number; color: string; cx?: number; cy?: number; _isStone?: boolean; _body?: number }[], step: number, opts: { rowPos?: number[]; colPos?: number[]; intersections?: Point[][]; indices?: number[]; blurRadius?: number } = {}) {
+  const patches: { index: number; imageData: { data: Uint8ClampedArray; width: number; height: number } }[] = [];
   if (step < 25) return patches;
 
   const { indices, blurRadius = 0 } = opts;
@@ -1300,7 +1388,7 @@ function extractStonePatches(grayMat, stones, step, opts = {}) {
     const s = stones[i];
     if (!s._isStone && s.color !== 'W' && s.color !== 'B') continue;
 
-    const cx = Math.round(s.cx), cy = Math.round(s.cy);
+    const cx = Math.round(s.cx!), cy = Math.round(s.cy!); // safe: cx/cy are set for all detected stones (caller contract)
     const x0 = cx - halfPatch, y0 = cy - halfPatch;
     const x1 = x0 + patchSide, y1 = y0 + patchSide;
     if (x0 < 0 || y0 < 0 || x1 > W || y1 > H) continue;
@@ -1310,7 +1398,7 @@ function extractStonePatches(grayMat, stones, step, opts = {}) {
 
     // Normalize polarity: if dark stone, invert so digits are dark-on-light
     const normalized = new cv.Mat();
-    if (s._body < 128) {
+    if (s._body! < 128) { // safe: _body is set for all classified stones (caller contract)
       cv.bitwise_not(patch, normalized);
     } else {
       patch.copyTo(normalized);
@@ -1357,7 +1445,7 @@ function extractStonePatches(grayMat, stones, step, opts = {}) {
 
 // ── SGF generation ──────────────────────────────────────────────────────────
 
-function inferBoardSize(visibleRows, visibleCols, elided) {
+function inferBoardSize(visibleRows: number, visibleCols: number, elided: ElidedEdges | null) {
   if (!elided) return Math.max(visibleRows, visibleCols);
   const elidedCount = [elided.top, elided.bottom, elided.left, elided.right]
     .filter(Boolean).length;
@@ -1374,7 +1462,7 @@ function inferBoardSize(visibleRows, visibleCols, elided) {
   return 19; // shouldn't reach here
 }
 
-function computeEdgeOffsets(visibleN, boardN, elidedLo, elidedHi) {
+function computeEdgeOffsets(visibleN: number, boardN: number, elidedLo: boolean, elidedHi: boolean) {
   // Returns the offset to add to the 0-based visible index to get the
   // absolute board coordinate.
   // elidedLo/elidedHi: whether the low (top/left) or high (bottom/right) edge is elided
@@ -1385,19 +1473,19 @@ function computeEdgeOffsets(visibleN, boardN, elidedLo, elidedHi) {
   return Math.floor((boardN - visibleN) / 2);
 }
 
-function generateSGF(stones, nRows, elided, nCols, digitMap) {
+function generateSGF(stones: { r: number; c: number; color: string }[], nRows: number, elided: ElidedEdges | null, nCols: number, digitMap: Map<number, { number: number; confidence?: number }> | null) {
   const visibleRows = nRows;
   const visibleCols = nCols ?? nRows;
   const boardN = inferBoardSize(visibleRows, visibleCols, elided);
   const rowOff = elided ? computeEdgeOffsets(visibleRows, boardN, elided.top, elided.bottom) : 0;
   const colOff = elided ? computeEdgeOffsets(visibleCols, boardN, elided.left, elided.right) : 0;
 
-  function coordOf(s) {
+  function coordOf(s: { r: number; c: number; color: string }) {
     return String.fromCharCode(97 + s.c + colOff)
          + String.fromCharCode(97 + s.r + rowOff);
   }
 
-  const ab = [], aw = [];
+  const ab: string[] = [], aw: string[] = [];
   const moves = []; // { number, coord, color }
 
   for (let i = 0; i < stones.length; i++) {
@@ -1429,7 +1517,7 @@ function generateSGF(stones, nRows, elided, nCols, digitMap) {
 
 // ── Quadratic fit (unweighted) ──────────────────────────────────────────────
 
-function fitQuadratic(xs, ys) {
+function fitQuadratic(xs: readonly number[], ys: readonly number[]) {
   const n = xs.length;
   let s4 = 0, s3 = 0, s2 = 0, s1 = 0;
   let sy2 = 0, sy1 = 0, sy0 = 0;
@@ -1464,11 +1552,11 @@ function fitQuadratic(xs, ys) {
   return c;
 }
 
-function polyEval([a, b, c], x) { return a * x * x + b * x + c; }
+function polyEval([a, b, c]: readonly number[], x: number) { return a * x * x + b * x + c; }
 
 // ── preSnapToCircles ────────────────────────────────────────────────────────
 
-function preSnapToCircles(rowPos, colPos, rawCircles, intersections, snapFrac = 0.45) {
+function preSnapToCircles(rowPos: readonly number[], colPos: readonly number[], rawCircles: Circle[], intersections: ReadonlyMatrix<Point>, snapFrac: number = 0.45) {
   const nR = rowPos.length, nC = colPos.length;
   const stepY = nR > 1 ? (rowPos[nR-1] - rowPos[0]) / (nR - 1) : 50;
   const stepX = nC > 1 ? (colPos[nC-1] - colPos[0]) / (nC - 1) : 50;
@@ -1505,7 +1593,7 @@ function preSnapToCircles(rowPos, colPos, rawCircles, intersections, snapFrac = 
 
 // ── collectOffsetSamples ────────────────────────────────────────────────────
 
-function collectOffsetSamples(grayMat, rowPos, colPos, cannyLo, cannyHi, rawCircles, intersections, uniformCoords = null) {
+function collectOffsetSamples(grayMat: CvMat, rowPos: readonly number[], colPos: readonly number[], cannyLo: number, cannyHi: number, rawCircles: Circle[], intersections: ReadonlyMatrix<Point>, uniformCoords: { rowY: number[]; colX: number[] } | null = null) {
   const nR = rowPos.length, nC = colPos.length;
   const W = grayMat.cols, H = grayMat.rows;
   const stepX = nC > 1 ? (colPos[nC-1] - colPos[0]) / (nC - 1) : W / 20;
@@ -1520,7 +1608,7 @@ function collectOffsetSamples(grayMat, rowPos, colPos, cannyLo, cannyHi, rawCirc
   const corners = new cv.Mat();
   cv.goodFeaturesToTrack(grayMat, corners, 500, 0.01, Math.min(stepX, stepY) * 0.3,
                          new cv.Mat(), 3, true, 0.04);
-  const harrisCorners = [];
+  const harrisCorners: Point[] = [];
   for (let i = 0; i < corners.rows; i++) {
     const cx = corners.floatAt(i, 0), cy = corners.floatAt(i, 1);
     if (!goodCircles.some(gc => Math.hypot(cx - gc.x, cy - gc.y) < gc.r + 2)) {
@@ -1547,7 +1635,7 @@ function collectOffsetSamples(grayMat, rowPos, colPos, cannyLo, cannyHi, rawCirc
     }
   }
 
-  function nearestCorner(ey, ex) {
+  function nearestCorner(ey: number, ex: number) {
     let best = null, bestDist = tol;
     for (const c of harrisCorners) {
       const d = Math.hypot(c.x - ex, c.y - ey);
@@ -1556,7 +1644,7 @@ function collectOffsetSamples(grayMat, rowPos, colPos, cannyLo, cannyHi, rawCirc
     return best;
   }
 
-  function detectHorizAt(ey, px) {
+  function detectHorizAt(ey: number, px: number) {
     const hw = Math.max(3, Math.round(stepX * 0.2));
     const hh = Math.round(stepY * 0.5);
     const x0 = Math.max(0, Math.round(px - hw));
@@ -1590,7 +1678,7 @@ function collectOffsetSamples(grayMat, rowPos, colPos, cannyLo, cannyHi, rawCirc
     return Math.abs(yDet - ey) < tol ? yDet - ey : null;
   }
 
-  function detectVertAt(ex, py) {
+  function detectVertAt(ex: number, py: number) {
     const hw = Math.round(stepX * 0.5);
     const hh = Math.max(3, Math.round(stepY * 0.2));
     const x0 = Math.max(0, Math.round(ex - hw));
@@ -1624,8 +1712,8 @@ function collectOffsetSamples(grayMat, rowPos, colPos, cannyLo, cannyHi, rawCirc
     return Math.abs(xDet - ex) < tol ? xDet - ex : null;
   }
 
-  const yDeltas    = Array.from({ length: nR }, () => []);
-  const xDeltas    = Array.from({ length: nC }, () => []);
+  const yDeltas    = Array.from({ length: nR }, (): number[] => []);
+  const xDeltas    = Array.from({ length: nC }, (): number[] => []);
   const samplePoints  = [];
   const tpsYPoints = [];
   const tpsXPoints = [];
@@ -1684,13 +1772,13 @@ function collectOffsetSamples(grayMat, rowPos, colPos, cannyLo, cannyHi, rawCirc
 
 // ── Separable quadratic fit ─────────────────────────────────────────────────
 
-function fitSeparableQuadratic(yXs, yYs, xXs, xYs) {
+function fitSeparableQuadratic(yXs: readonly number[], yYs: readonly number[], xXs: readonly number[], xYs: readonly number[]) {
   return { yCoeffs: fitQuadratic(yXs, yYs), xCoeffs: fitQuadratic(xXs, xYs) };
 }
 
 // ── localGridOffsets ────────────────────────────────────────────────────────
 
-function localGridOffsets(grayMat, rowPos, colPos, cannyLo, cannyHi, lineThresh, rawCircles) {
+function localGridOffsets(grayMat: CvMat, rowPos: readonly number[], colPos: readonly number[], cannyLo: number, cannyHi: number, lineThresh: number, rawCircles: Circle[]) {
   const TILES = 5;
   const nR = rowPos.length, nC = colPos.length;
   const W = grayMat.cols, H = grayMat.rows;
@@ -1712,7 +1800,7 @@ function localGridOffsets(grayMat, rowPos, colPos, cannyLo, cannyHi, lineThresh,
   const tileHW  = Math.round(step * 2.5);
   const tileThr = Math.max(8, Math.round(lineThresh * (2 * tileHW) / W));
 
-  const actualY = [], actualX = [];
+  const actualY: number[][] = [], actualX: number[][] = [];
 
   for (let ti = 0; ti < TILES; ti++) {
     actualY.push([]);
@@ -1780,7 +1868,7 @@ function localGridOffsets(grayMat, rowPos, colPos, cannyLo, cannyHi, lineThresh,
 
 // ── RANSAC filters ──────────────────────────────────────────────────────────
 
-function ransacFilter1D(xs, ys, coeffs, madMultiplier = 2.5) {
+function ransacFilter1D(xs: readonly number[], ys: readonly number[], coeffs: readonly number[], madMultiplier: number = 2.5) {
   const n = xs.length;
   if (n < 4) return { xs: Array.from(xs), ys: Array.from(ys) };
   const residuals = Array.from(xs, (x, i) => Math.abs(ys[i] - polyEval(coeffs, x)));
@@ -1792,7 +1880,7 @@ function ransacFilter1D(xs, ys, coeffs, madMultiplier = 2.5) {
   return { xs: filtXs, ys: filtYs };
 }
 
-function ransacFilter(pts, predictFn, madMultiplier = 2.5) {
+function ransacFilter(pts: readonly TPSPoint[], predictFn: (pt: TPSPoint) => number, madMultiplier: number = 2.5) {
   if (pts.length < 4) return pts;
   const residuals = pts.map(pt => Math.abs(pt.target - predictFn(pt)));
   const mad = median(residuals);
@@ -1802,11 +1890,11 @@ function ransacFilter(pts, predictFn, madMultiplier = 2.5) {
 
 // ── Piecewise cylinder dewarping ────────────────────────────────────────────
 
-function evalCylinderDisp(R, yc, y) {
+function evalCylinderDisp(R: number, yc: number, y: number) {
   return yc + R * Math.sin((y - yc) / R) - y;
 }
 
-function fitCylinder1D(xs, ys) {
+function fitCylinder1D(xs: readonly number[], ys: readonly number[]) {
   const n = xs.length;
   if (n < 2) return { R: 1e6, yc: 0 };
   let yc = (xs[0] + xs[n - 1]) / 2;
@@ -1835,7 +1923,7 @@ function fitCylinder1D(xs, ys) {
   return { R: isFinite(R) ? R : 1e6, yc: isFinite(yc) ? yc : 0 };
 }
 
-function fitPiecewiseCylinders(xs, ys) {
+function fitPiecewiseCylinders(xs: readonly number[], ys: readonly number[]) {
   const n = xs.length;
   if (n < 2) return { pieces: [{ R: 1e6, yc: 0 }], breakpoints: [], blendW: 1 };
 
@@ -1851,7 +1939,7 @@ function fitPiecewiseCylinders(xs, ys) {
   for (let i = 1; i < steps; i++)
     cands.push(sxs[Math.floor(i * n / steps)]);
 
-  function segFit(lo, hi) {
+  function segFit(lo: number, hi: number) {
     const segXs = sxs.slice(lo, hi), segYs = sys.slice(lo, hi);
     const cyl = fitCylinder1D(segXs, segYs);
     let ssr = 0;
@@ -1862,7 +1950,7 @@ function fitPiecewiseCylinders(xs, ys) {
     return { cyl, ssr };
   }
 
-  function evalBreaks(breaks) {
+  function evalBreaks(breaks: number[]) {
     const bounds = [0];
     for (const b of breaks) {
       const idx = sxs.findIndex(x => x >= b);
@@ -1881,7 +1969,7 @@ function fitPiecewiseCylinders(xs, ys) {
     return { pieces, ssr: totalSSR };
   }
 
-  function bic(ssr, numPieces) {
+  function bic(ssr: number, numPieces: number) {
     if (ssr <= 0) return -Infinity;
     const numParams = 2 * numPieces + (numPieces - 1);
     return n * Math.log(ssr / n) + numParams * Math.log(n);
@@ -1924,7 +2012,7 @@ function fitPiecewiseCylinders(xs, ys) {
   return result;
 }
 
-function evalPiecewiseCylinders({ pieces, breakpoints, blendW }, y) {
+function evalPiecewiseCylinders({ pieces, breakpoints, blendW }: PiecewiseModel, y: number) {
   let disp = evalCylinderDisp(pieces[0].R, pieces[0].yc, y);
   for (let j = 0; j < breakpoints.length; j++) {
     const t0 = (y - breakpoints[j] + blendW) / (2 * blendW);
@@ -1936,7 +2024,7 @@ function evalPiecewiseCylinders({ pieces, breakpoints, blendW }, y) {
   return disp;
 }
 
-function invertPiecewiseCylinder(model, src) {
+function invertPiecewiseCylinder(model: PiecewiseModel, src: number) {
   let dst = src;
   for (let i = 0; i < 10; i++) {
     const f = dst + evalPiecewiseCylinders(model, dst) - src;
@@ -1949,7 +2037,7 @@ function invertPiecewiseCylinder(model, src) {
   return dst;
 }
 
-function mapPositionsThroughDewarp(positions, model) {
+function mapPositionsThroughDewarp(positions: readonly number[], model: PiecewiseModel) {
   return positions.map(p => invertPiecewiseCylinder(model, p));
 }
 
@@ -1957,11 +2045,11 @@ function mapPositionsThroughDewarp(positions, model) {
 
 const TPS_LAMBDA = 0.001;
 
-function tpsKernel(r2) {
+function tpsKernel(r2: number) {
   return r2 < 1e-10 ? 0 : 0.5 * r2 * Math.log(r2);
 }
 
-function solveLinear(A, b) {
+function solveLinear(A: ArrayLike<number>[], b: ArrayLike<number>) {
   const N = b.length;
   const a = A.map(row => Float64Array.from(row));
   const rhs = Float64Array.from(b);
@@ -1987,7 +2075,7 @@ function solveLinear(A, b) {
   return sol;
 }
 
-function fitTPS(pts, lambda = TPS_LAMBDA) {
+function fitTPS(pts: readonly TPSPoint[], lambda: number = TPS_LAMBDA) {
   const N = pts.length;
   if (N < 3) return null;
 
@@ -2019,7 +2107,7 @@ function fitTPS(pts, lambda = TPS_LAMBDA) {
   return { norm, w: sol.slice(0, N), a: [sol[N], sol[N+1], sol[N+2]], minX, scX, minY, scY };
 }
 
-function evalTPS({ norm, w, a, minX, scX, minY, scY }, x, y) {
+function evalTPS({ norm, w, a, minX, scX, minY, scY }: TPSModel, x: number, y: number) {
   const xn = (x - minX) / scX, yn = (y - minY) / scY;
   let val = a[0] + a[1] * xn + a[2] * yn;
   for (let i = 0; i < norm.length; i++) {
@@ -2029,7 +2117,7 @@ function evalTPS({ norm, w, a, minX, scX, minY, scY }, x, y) {
   return val;
 }
 
-function invertTPS(tpsY, tpsX, sx, sy) {
+function invertTPS(tpsY: TPSModel, tpsX: TPSModel, sx: number, sy: number) {
   let dx = sx, dy = sy;
   const h = 0.5;
   for (let i = 0; i < 15; i++) {
@@ -2050,7 +2138,7 @@ function invertTPS(tpsY, tpsX, sx, sy) {
 
 // ── Dewarp image functions ──────────────────────────────────────────────────
 
-function dewarpImage(colorMat, yCoeffs, xCoeffs) {
+function dewarpImage(colorMat: CvMat, yCoeffs: readonly number[], xCoeffs: readonly number[]) {
   const W = colorMat.cols, H = colorMat.rows;
   const mapXData = new Float32Array(W * H);
   const mapYData = new Float32Array(W * H);
@@ -2073,7 +2161,7 @@ function dewarpImage(colorMat, yCoeffs, xCoeffs) {
   return dewarped;
 }
 
-function dewarpImageTPS(colorMat, tpsY, tpsX, outW, outH) {
+function dewarpImageTPS(colorMat: CvMat, tpsY: TPSModel, tpsX: TPSModel, outW: number, outH: number) {
   const GRID = 25;
 
   const gMapX = new Float32Array(GRID * GRID);
@@ -2117,7 +2205,7 @@ function dewarpImageTPS(colorMat, tpsY, tpsX, outW, outH) {
   return dewarped;
 }
 
-function dewarpImagePiecewise(colorMat, yModel, xModel) {
+function dewarpImagePiecewise(colorMat: CvMat, yModel: PiecewiseModel, xModel: PiecewiseModel) {
   const W = colorMat.cols, H = colorMat.rows;
   const mapXData = new Float32Array(W * H);
   const mapYData = new Float32Array(W * H);
@@ -2137,7 +2225,7 @@ function dewarpImagePiecewise(colorMat, yModel, xModel) {
   return dewarped;
 }
 
-function dewarpImageMesh(colorMat, actualY, actualX, ctrlRow, ctrlCol) {
+function dewarpImageMesh(colorMat: CvMat, actualY: ReadonlyMatrix<number>, actualX: ReadonlyMatrix<number>, ctrlRow: readonly number[], ctrlCol: readonly number[]) {
   const nR = ctrlRow.length, nC = ctrlCol.length;
   if (nR < 2 || nC < 2) return colorMat.clone();
 
@@ -2177,7 +2265,7 @@ function dewarpImageMesh(colorMat, actualY, actualX, ctrlRow, ctrlCol) {
 
 // ── buildCombinedGridPoints ─────────────────────────────────────────────────
 
-function buildCombinedGridPoints(ptsY, ptsX, rowPos, colPos, pilotLambda, includeBorder = true, uniRowY = null, uniColX = null) {
+function buildCombinedGridPoints(ptsY: readonly TPSPoint[], ptsX: readonly TPSPoint[], rowPos: readonly number[], colPos: readonly number[], pilotLambda: number, includeBorder: boolean = true, uniRowY: readonly number[] | null = null, uniColX: readonly number[] | null = null) {
   const nR = rowPos.length, nC = colPos.length;
   if (nR < 2 || nC < 2) return null;
   const stepY = (rowPos[nR - 1] - rowPos[0]) / (nR - 1);
@@ -2187,7 +2275,7 @@ function buildCombinedGridPoints(ptsY, ptsX, rowPos, colPos, pilotLambda, includ
   const grpRowY = uniRowY || rowPos;
   const grpColX = uniColX || colPos;
 
-  const rowYMeas = Array.from({ length: nR }, () => []);
+  const rowYMeas = Array.from({ length: nR }, (): number[][] => []);
   for (const pt of ptsY) {
     let bestI = 0, bestD = Infinity;
     for (let i = 0; i < nR; i++) {
@@ -2197,7 +2285,7 @@ function buildCombinedGridPoints(ptsY, ptsX, rowPos, colPos, pilotLambda, includ
     if (bestD < uStepY * 0.4) rowYMeas[bestI].push([pt.x, pt.target]);
   }
 
-  const colXMeas = Array.from({ length: nC }, () => []);
+  const colXMeas = Array.from({ length: nC }, (): number[][] => []);
   for (const pt of ptsX) {
     let bestJ = 0, bestD = Infinity;
     for (let j = 0; j < nC; j++) {
@@ -2207,7 +2295,7 @@ function buildCombinedGridPoints(ptsY, ptsX, rowPos, colPos, pilotLambda, includ
     if (bestD < uStepX * 0.4) colXMeas[bestJ].push([pt.y, pt.target]);
   }
 
-  function linearFit(pairs) {
+  function linearFit(pairs: number[][]) {
     const n = pairs.length;
     if (n === 0) return null;
     if (n === 1) return () => pairs[0][1];
@@ -2217,7 +2305,7 @@ function buildCombinedGridPoints(ptsY, ptsX, rowPos, colPos, pilotLambda, includ
     if (Math.abs(det) < 1e-6) return () => sy / n;
     const b = (n * sxy - sx * sy) / det;
     const a = (sy - b * sx) / n;
-    return x => a + b * x;
+    return (x: number) => a + b * x;
   }
 
   const rowYFns = rowYMeas.map(linearFit);
@@ -2226,27 +2314,27 @@ function buildCombinedGridPoints(ptsY, ptsX, rowPos, colPos, pilotLambda, includ
   const pilotY = fitTPS(ptsY, pilotLambda);
   const pilotX = fitTPS(ptsX, pilotLambda);
 
-  function extrapY(f0, f1, x_nom, y_nom, nomOffset) {
+  function extrapY(f0: ((x: number) => number) | null, f1: ((x: number) => number) | null, x_nom: number, y_nom: number, nomOffset: number) {
     if (f0 && f1) return 2 * f0(x_nom) - f1(x_nom);
     if (f0) return f0(x_nom) + nomOffset;
     if (pilotY) return evalTPS(pilotY, x_nom, y_nom);
     return y_nom;
   }
-  function extrapX(f0, f1, y_nom, x_nom, nomOffset) {
+  function extrapX(f0: ((x: number) => number) | null, f1: ((x: number) => number) | null, y_nom: number, x_nom: number, nomOffset: number) {
     if (f0 && f1) return 2 * f0(y_nom) - f1(y_nom);
     if (f0) return f0(y_nom) + nomOffset;
     if (pilotX) return evalTPS(pilotX, x_nom, y_nom);
     return x_nom;
   }
 
-  function actualY(rowIdx, x_nom, y_nom) {
+  function actualY(rowIdx: number, x_nom: number, y_nom: number) {
     if (rowIdx === -1)   return extrapY(rowYFns[0],      rowYFns[1],      x_nom, y_nom, -uStepY);
     if (rowIdx === nR)   return extrapY(rowYFns[nR - 1], rowYFns[nR - 2], x_nom, y_nom, +uStepY);
     if (rowYFns[rowIdx]) return rowYFns[rowIdx](x_nom);
     if (pilotY)          return evalTPS(pilotY, x_nom, y_nom);
     return y_nom;
   }
-  function actualX(colIdx, x_nom, y_nom) {
+  function actualX(colIdx: number, x_nom: number, y_nom: number) {
     if (colIdx === -1)   return extrapX(colXFns[0],      colXFns[1],      y_nom, x_nom, -uStepX);
     if (colIdx === nC)   return extrapX(colXFns[nC - 1], colXFns[nC - 2], y_nom, x_nom, +uStepX);
     if (colXFns[colIdx]) return colXFns[colIdx](y_nom);
@@ -2273,13 +2361,13 @@ function buildCombinedGridPoints(ptsY, ptsX, rowPos, colPos, pilotLambda, includ
 
 // ── buildDetectionFromControlPoints ─────────────────────────────────────────
 
-function buildDetectionFromControlPoints(combined, tpsY, tpsX, det1) {
+function buildDetectionFromControlPoints(combined: CombinedGrid, tpsY: TPSModel, tpsX: TPSModel, det1: Detection) {
   const { gridY, gridX, nRext, nCext, hasBorder } = combined;
   const rOff = hasBorder ? 1 : 0;
   const nRint = nRext - 2 * rOff, nCint = nCext - 2 * rOff;
 
-  const dyRows = Array.from({ length: nRint }, () => []);
-  const dxCols = Array.from({ length: nCint }, () => []);
+  const dyRows = Array.from({ length: nRint }, (): number[] => []);
+  const dxCols = Array.from({ length: nCint }, (): number[] => []);
 
   for (let ri = 0; ri < nRint; ri++) {
     for (let ci = 0; ci < nCint; ci++) {
@@ -2305,7 +2393,7 @@ function buildDetectionFromControlPoints(combined, tpsY, tpsX, det1) {
 
 // ── mapDetectionThroughWarp ─────────────────────────────────────────────────
 
-function mapDetectionThroughWarp(det1, mapRows, mapCols) {
+function mapDetectionThroughWarp(det1: Detection, mapRows: (pos: number[]) => number[], mapCols: (pos: number[]) => number[]) {
   const rowPos = mapRows(det1.rowPos);
   const colPos = mapCols(det1.colPos);
   const intersections = buildIntersections(rowPos, colPos, 0, 0, 1, 1);
@@ -2323,7 +2411,7 @@ function mapDetectionThroughWarp(det1, mapRows, mapCols) {
 
 // ── nearestIndex ────────────────────────────────────────────────────────────
 
-function nearestIndex(arr, val) {
+function nearestIndex(arr: readonly number[], val: number) {
   let best = 0, bestDist = Infinity;
   for (let i = 0; i < arr.length; i++) {
     const d = Math.abs(arr[i] - val);
@@ -2334,7 +2422,7 @@ function nearestIndex(arr, val) {
 
 // ── Elided edge detection ───────────────────────────────────────────────────
 
-function detectElidedEdges(grayMat, detection, stones) {
+function detectElidedEdges(grayMat: CvMat, detection: Detection, stones: { r: number; c: number; color: string }[]) {
   const { rowPos, colPos, step } = detection;
   const nRows = rowPos.length, nCols = colPos.length;
 
@@ -2358,7 +2446,7 @@ function detectElidedEdges(grayMat, detection, stones) {
   const pixelThreshold = 0.20; // fraction of strip pixels to call a tick
   const voteThreshold  = 0.40; // fraction of lines that must have ticks
 
-  function countTicksAlongEdge(perpPositions, edgePos, dir, isVertical) {
+  function countTicksAlongEdge(perpPositions: number[], edgePos: number, dir: number, isVertical: boolean) {
     // perpPositions: positions along the edge (colPos for top/bottom, rowPos for left/right)
     // edgePos: position of the outermost row/col
     // dir: -1 means sample toward 0, +1 means sample toward W or H
@@ -2409,7 +2497,7 @@ function detectElidedEdges(grayMat, detection, stones) {
 
 // ── Build detection from forced grid in original image coords ────────────────
 
-function buildDetectionFromGrid(gridPoints, rectCorners, rectW, rectH) {
+function buildDetectionFromGrid(gridPoints: { x: number; y: number; r: number; c: number }[], rectCorners: Point[], rectW: number, rectH: number) {
   // Forward perspective transform: original → rectified space
   const srcPts = cv.matFromArray(4, 1, cv.CV_32FC2, [
     rectCorners[0].x, rectCorners[0].y,
@@ -2437,27 +2525,29 @@ function buildDetectionFromGrid(gridPoints, rectCorners, rectW, rectH) {
   dstMat.delete();
 
   // Group by row/col and build detection object
-  const fRows = new Map(), fCols = new Map();
-  const intersections = [];
+  const fRows = new Map<number, number[]>(), fCols = new Map<number, number[]>();
+  const intersections: Point[][] = [];
   for (let i = 0; i < rectPts.length; i++) {
     const { r, c } = gridPoints[i];
     const pt = rectPts[i];
-    if (!fRows.has(r)) fRows.set(r, []);
-    if (!fCols.has(c)) fCols.set(c, []);
-    fRows.get(r).push(pt.y);
-    fCols.get(c).push(pt.x);
+    let rowArr = fRows.get(r);
+    if (!rowArr) fRows.set(r, rowArr = []);
+    let colArr = fCols.get(c);
+    if (!colArr) fCols.set(c, colArr = []);
+    rowArr.push(pt.y);
+    colArr.push(pt.x);
   }
 
   const sortedR = [...fRows.keys()].sort((a, b) => a - b);
   const sortedC = [...fCols.keys()].sort((a, b) => a - b);
-  const rowPos = sortedR.map(r => median(fRows.get(r)));
-  const colPos = sortedC.map(c => median(fCols.get(c)));
+  const rowPos = sortedR.map(r => median(fRows.get(r)!)); // safe: sortedR keys come from fRows
+  const colPos = sortedC.map(c => median(fCols.get(c)!)); // safe: sortedC keys come from fCols
 
   const rIdx = new Map(sortedR.map((r, i) => [r, i]));
   const cIdx = new Map(sortedC.map((c, i) => [c, i]));
   for (let ri = 0; ri < sortedR.length; ri++) intersections.push([]);
   for (let i = 0; i < rectPts.length; i++) {
-    intersections[rIdx.get(gridPoints[i].r)][cIdx.get(gridPoints[i].c)] = rectPts[i];
+    intersections[rIdx.get(gridPoints[i].r)!][cIdx.get(gridPoints[i].c)!] = rectPts[i]; // safe: keys come from sortedR/sortedC built from fRows/fCols
   }
 
   const gaps = [];

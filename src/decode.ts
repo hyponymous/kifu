@@ -6,10 +6,10 @@
  * download(sgf, name)  → void             triggers browser file download
  */
 
-import { parse, MAX_BYTES } from './sgf-parser.js';
+import { parse, MAX_BYTES } from './sgf-parser';
 
-export async function decode(fragment, maxBytes = MAX_BYTES) {
-  let compressed;
+export async function decode(fragment: string, maxBytes: number = MAX_BYTES): Promise<string> {
+  let compressed: Uint8Array;
   try {
     compressed = fromBase64Url(fragment);
   } catch {
@@ -23,13 +23,13 @@ export async function decode(fragment, maxBytes = MAX_BYTES) {
   return sgf;
 }
 
-export async function decodeFromHash() {
+export async function decodeFromHash(): Promise<string> {
   const fragment = location.hash.slice(1);
   if (!fragment) throw new Error('No SGF data in URL fragment');
   return decode(fragment);
 }
 
-export function download(sgf, filename = 'game.sgf') {
+export function download(sgf: string, filename: string = 'game.sgf'): void {
   const safe = filename.replace(/[/\\:*?"<>|]/g, '_');
   const blob = new Blob([sgf], { type: 'application/x-go-sgf' });
   const url = URL.createObjectURL(blob);
@@ -45,13 +45,13 @@ export function download(sgf, filename = 'game.sgf') {
 
 // ── Internals ─────────────────────────────────────────────────────────────────
 
-async function gunzip(data, maxBytes) {
+async function gunzip(data: Uint8Array, maxBytes: number): Promise<Uint8Array> {
   const stream = new DecompressionStream('gzip');
   const writer = stream.writable.getWriter();
   // Swallow write/close errors: the stream may be cancelled (e.g. size limit exceeded)
-  writer.write(data).then(() => writer.close()).catch(() => {});
+  writer.write(data as Uint8Array<ArrayBuffer>).then(() => writer.close()).catch(() => {});
 
-  const chunks = [];
+  const chunks: Uint8Array[] = [];
   let totalLength = 0;
   const reader = stream.readable.getReader();
 
@@ -75,7 +75,7 @@ async function gunzip(data, maxBytes) {
   return result;
 }
 
-function fromBase64Url(str) {
+function fromBase64Url(str: string): Uint8Array {
   const base64 = str.replace(/-/g, '+').replace(/_/g, '/');
   const padded = base64 + '=='.slice(0, (4 - (base64.length % 4)) % 4);
   const binary = atob(padded);

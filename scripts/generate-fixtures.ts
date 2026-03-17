@@ -2,10 +2,11 @@
 // generate-fixtures.js — runs the photo pipeline on images and writes fixture JSON
 // Usage: node generate-fixtures.js fixtures/IMG_0976.jpg [...]
 
-import '../test/helpers/load-cv.js';
-import { loadImage } from '../test/helpers/load-image.js';
+import '../test/helpers/load-cv';
+import { loadImage } from '../test/helpers/load-image';
 import { writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import type { Point } from '../src/photo-pipeline';
 
 const {
   findBoardCornersCore, rectifyBoard, detectGrid, enhanceGray,
@@ -14,7 +15,7 @@ const {
   dewarpImage, dewarpImageTPS, polyEval,
   ransacFilter, fitTPS, evalTPS,
   buildCombinedGridPoints, buildDetectionFromControlPoints,
-} = await import('../src/photo-pipeline.js');
+} = await import('../src/photo-pipeline');
 
 const files = process.argv.slice(2);
 if (files.length === 0) {
@@ -24,8 +25,8 @@ if (files.length === 0) {
 
 for (const filePath of files) {
   console.log(`\n=== Processing ${filePath} ===`);
-  const toDelete = [];
-  const mat = m => { toDelete.push(m); return m; };
+  const toDelete: CvMat[] = [];
+  const mat = (m: CvMat): CvMat => { toDelete.push(m); return m; };
 
   try {
     const { colorMat, grayMat, width, height } = await loadImage(filePath);
@@ -49,7 +50,7 @@ for (const filePath of files) {
       { x: 0, y: height - 1 },
     ];
 
-    const dist2d = (a, b) => Math.hypot(b.x - a.x, b.y - a.y);
+    const dist2d = (a: Point, b: Point) => Math.hypot(b.x - a.x, b.y - a.y);
     const [TL, TR, BR, BL] = rectCorners;
     const naturalW = Math.min(Math.round(Math.max(dist2d(TL, TR), dist2d(BL, BR))), width);
     const naturalH = Math.min(Math.round(Math.max(dist2d(TL, BL), dist2d(TR, BR))), height);
@@ -103,8 +104,8 @@ for (const filePath of files) {
 
     const tpsLambda = 0.1;
     const ransacThr = 2.9;
-    const uni2snapY = u => snappedRows[0] + (u - uniPad) / uniStep * stepY;
-    const uni2snapX = u => snappedCols[0] + (u - uniPad) / uniStep * stepX;
+    const uni2snapY = (u: number) => snappedRows[0] + (u - uniPad) / uniStep * stepY;
+    const uni2snapX = (u: number) => snappedCols[0] + (u - uniPad) / uniStep * stepX;
     const cleanY = ransacFilter(tpsYPoints, pt => uni2snapY(pt.y) + polyEval(yCoeffs, uni2snapY(pt.y)), ransacThr);
     const cleanX = ransacFilter(tpsXPoints, pt => uni2snapX(pt.x) + polyEval(xCoeffs, uni2snapX(pt.x)), ransacThr);
     const combined = buildCombinedGridPoints(cleanY, cleanX, snappedRows, snappedCols, tpsLambda, false, uniRowY, uniColX);
@@ -163,7 +164,7 @@ for (const filePath of files) {
     console.log(`  Wrote ${outPath} (${stones.length} stones)`);
 
   } catch (err) {
-    console.error(`  Error processing ${filePath}:`, err.message);
+    console.error(`  Error processing ${filePath}:`, (err as Error).message);
   } finally {
     toDelete.forEach(m => { try { m.delete(); } catch {} });
   }

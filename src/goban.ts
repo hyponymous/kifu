@@ -1,10 +1,29 @@
+import type { GameTree, Props } from './sgf-parser';
+
 const CELL = 30;
 const MARGIN = 40;
 const JITTER = 0.5; // max px of positional noise per stone
 const COL_LETTERS = 'ABCDEFGHJKLMNOPQRSTUVWXYZ';
+
+export interface RenderOptions {
+  margin?: number;
+  jitter?: number;
+  stoneScale?: number;
+  labelGap?: number;
+  forceFullBoard?: boolean;
+  onClick?: (r: number, c: number) => void;
+}
+
+export interface Viewport {
+  vR0: number;
+  vR1: number;
+  vC0: number;
+  vC1: number;
+}
+
 // Star points for square boards only; rectangular boards get none.
 // N < 5: none; 5–8: center if odd; 9–18: corners + center if odd; ≥19: full 3×3 grid.
-function hoshiPoints(N) {
+function hoshiPoints(N: number): number[][] {
   if (N < 5) return [];
   const corner = N >= 13 ? 3 : 2;
   const far = N - 1 - corner;
@@ -18,25 +37,25 @@ function hoshiPoints(N) {
   return pos.flatMap(r => pos.map(c => [r, c]));
 }
 
-function svgEl(tag, attrs) {
+function svgEl(tag: string, attrs: Record<string, string | number>): SVGElement {
   const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
-  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
   return el;
 }
 
-function sgfCoord(ch) {
+function sgfCoord(ch: string): number {
   return ch.charCodeAt(0) - 97; // 'a'=0, 'b'=1, …
 }
 
 // Deterministic pseudo-random offset in [-1, 1] based on board position + axis
-function posJitter(r, c, axis) {
+function posJitter(r: number, c: number, axis: number): number {
   const s = Math.sin(r * 127.1 + c * 311.7 + axis * 543.9) * 43758.5453;
   return (s - Math.floor(s)) * 2 - 1;
 }
 
 // Expand an SGF point value, which may be a compressed rectangle "ul:lr".
 // Yields [r, c] pairs for all points in the rectangle (or the single point).
-function* expandCoords(val) {
+function* expandCoords(val: string): Generator<[number, number]> {
   if (val.length === 5 && val[2] === ':') {
     const c1 = sgfCoord(val[0]), r1 = sgfCoord(val[1]);
     const c2 = sgfCoord(val[3]), r2 = sgfCoord(val[4]);
@@ -48,16 +67,16 @@ function* expandCoords(val) {
   }
 }
 
-function floodFill(board, cols, rows, r, c, color) {
+function floodFill(board: Int8Array, cols: number, rows: number, r: number, c: number, color: number) {
   const visited = new Uint8Array(cols * rows);
-  const queue = [[r, c]];
-  const cells = [];
+  const queue: [number, number][] = [[r, c]];
+  const cells: [number, number][] = [];
   visited[r * cols + c] = 1;
   let liberties = 0;
   while (queue.length) {
-    const [row, col] = queue.shift();
+    const [row, col] = queue.shift()!; // safe: loop condition guarantees non-empty
     cells.push([row, col]);
-    for (const [dr, dc] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+    for (const [dr, dc] of [[-1,0],[1,0],[0,-1],[0,1]] as const) {
       const nr = row + dr, nc = col + dc;
       if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
       const idx = nr * cols + nc;
@@ -71,8 +90,8 @@ function floodFill(board, cols, rows, r, c, color) {
   return { cells, liberties };
 }
 
-function checkCaptures(board, cols, rows, r, c, opponent) {
-  for (const [dr, dc] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+function checkCaptures(board: Int8Array, cols: number, rows: number, r: number, c: number, opponent: number): void {
+  for (const [dr, dc] of [[-1,0],[1,0],[0,-1],[0,1]] as const) {
     const nr = r + dr, nc = c + dc;
     if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
     if (board[nr * cols + nc] !== opponent) continue;
@@ -83,7 +102,7 @@ function checkCaptures(board, cols, rows, r, c, opponent) {
   }
 }
 
-export function replayMain(board, cols, rows, tree, setupOnly = false) {
+export function replayMain(board: Int8Array, cols: number, rows: number, tree: GameTree, setupOnly = false): void {
   for (const node of tree.nodes) {
     const { props } = node;
     for (const val of (props.AB ?? [])) {
@@ -99,7 +118,7 @@ export function replayMain(board, cols, rows, tree, setupOnly = false) {
         if (r >= 0 && r < rows && c >= 0 && c < cols) board[r * cols + c] = 0;
     }
     if (!setupOnly) {
-      for (const [prop, color] of [['B', 1], ['W', -1]]) {
+      for (const [prop, color] of [['B', 1], ['W', -1]] as const) {
         const val = props[prop]?.[0];
         if (val === undefined) continue;
         if (val === '' || val === 'tt') continue; // pass
@@ -120,7 +139,7 @@ export function replayMain(board, cols, rows, tree, setupOnly = false) {
 //   B — no setup stones (AB/AW) → pure move sequence is a game → force full board
 //   C — per-edge proximity: snap each edge independently when the bounding box
 //       comes within K lines (corner hoshi + 1: 4 for ≥13, 3 for smaller boards)
-export function calculateViewport(board, cols, rows, rootProps, tree) {
+export function calculateViewport(board: Int8Array, cols: number, rows: number, rootProps: Props, tree: GameTree): Viewport {
   let minR = rows, maxR = -1, minC = cols, maxC = -1;
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
@@ -147,7 +166,7 @@ export function calculateViewport(board, cols, rows, rootProps, tree) {
   };
 }
 
-export function renderGoban(trees, container, opts = {}) {
+export function renderGoban(trees: readonly GameTree[], container: HTMLElement, opts: RenderOptions = {}): void {
   const M  = opts.margin     ?? MARGIN;
   const jt = opts.jitter     ?? JITTER;
   const ss = opts.stoneScale ?? 0.49;
@@ -161,7 +180,7 @@ export function renderGoban(trees, container, opts = {}) {
     if (rootProps.GM && rootProps.GM[0] !== '1') return;
 
     const szProp = rootProps.SZ?.[0] ?? '19';
-    let cols, rows;
+    let cols: number, rows: number;
     if (szProp.includes(':')) {
       const parts = szProp.split(':');
       cols = parseInt(parts[0], 10);
@@ -321,7 +340,7 @@ export function renderGoban(trees, container, opts = {}) {
         if (v === 0) continue;
         const cx = M + (c - vC0) * CELL + posJitter(r, c, 0) * jt;
         const cy = M + (r - vR0) * CELL + posJitter(r, c, 1) * jt;
-        const attrs = { cx, cy, r: R };
+        const attrs: Record<string, string | number> = { cx, cy, r: R };
         if (v === 1) {
           attrs.fill = '#1a1a1a';
         } else {
@@ -334,7 +353,7 @@ export function renderGoban(trees, container, opts = {}) {
     }
 
     // Markup — drawn on top of stones, from the last displayed node
-    let dispTree = tree;
+    let dispTree: GameTree = tree;
     while (dispTree.variations?.[0]) dispTree = dispTree.variations[0];
     const dispProps = dispTree.nodes[dispTree.nodes.length - 1]?.props ?? {};
 
@@ -380,7 +399,7 @@ export function renderGoban(trees, container, opts = {}) {
       const v = board[mr * cols + mc];
       const col = v === 1 ? '#f5f5f0' : '#1a1a1a';
       const d = R * 0.4;
-      const ls = { stroke: col, 'stroke-width': mw, 'stroke-linecap': 'round' };
+      const ls: Record<string, string | number> = { stroke: col, 'stroke-width': mw, 'stroke-linecap': 'round' };
       svg.appendChild(svgEl('line', { x1: cx-d, y1: cy-d, x2: cx+d, y2: cy+d, ...ls }));
       svg.appendChild(svgEl('line', { x1: cx+d, y1: cy-d, x2: cx-d, y2: cy+d, ...ls }));
     }
@@ -393,7 +412,7 @@ export function renderGoban(trees, container, opts = {}) {
             x: M + (c - vC0) * CELL - CELL / 2, y: M + (r - vR0) * CELL - CELL / 2,
             width: CELL, height: CELL, fill: 'transparent', 'pointer-events': 'all',
           });
-          rect.addEventListener('click', () => opts.onClick(r, c));
+          rect.addEventListener('click', () => opts.onClick?.(r, c));
           g.appendChild(rect);
         }
       }

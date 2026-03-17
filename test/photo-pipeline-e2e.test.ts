@@ -1,7 +1,7 @@
 // photo-pipeline-e2e.test.js — end-to-end tests using fixture ground truth
-import './helpers/load-cv.js';
-import { loadImage } from './helpers/load-image.js';
-import { runPipeline } from '../src/run-pipeline.js';
+import './helpers/load-cv';
+import { loadImage } from './helpers/load-image';
+import { runPipeline } from '../src/run-pipeline';
 import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
@@ -27,9 +27,11 @@ const MATCH_THRESHOLD = 0.85;
 
 // ── Eval recording ──────────────────────────────────────────────────────────
 
-const evalResults = {};
+type GridErrors = { gridErrorMean: number; gridErrorMax: number; gridErrorP95: number };
+type EvalEntry = { matchRate: number; mismatches: number; gridErrors?: GridErrors | null };
+const evalResults: Record<string, EvalEntry> = {};
 
-function computeGridErrors(detected, groundTruth, nRows, nCols) {
+function computeGridErrors(detected: { r: number; c: number; x: number; y: number }[], groundTruth: [number, number][], nRows: number, nCols: number) {
   // groundTruth is flat array of [x, y] in row-major order
   if (groundTruth.length !== nRows * nCols) return null;
 
@@ -72,7 +74,7 @@ function getGitInfo() {
 
 function writeEvalRecord() {
   const git = getGitInfo();
-  const fixtureScores = {};
+  const fixtureScores: Record<string, object> = {};
   const matchRates = [];
   const gridErrorMeans = [];
   const gridErrorMaxes = [];
@@ -87,7 +89,7 @@ function writeEvalRecord() {
     }
   }
 
-  const aggregate = {
+  const aggregate: { matchRateMean: number; gridErrorMean?: number; gridErrorMax?: number } = {
     matchRateMean: +(matchRates.reduce((s, v) => s + v, 0) / matchRates.length).toFixed(4),
   };
   if (gridErrorMeans.length > 0) {
@@ -179,7 +181,7 @@ describe('photo pipeline e2e', () => {
       }
 
       // Record eval data
-      const evalData = { matchRate, mismatches: mismatches.length };
+      const evalData: EvalEntry = { matchRate, mismatches: mismatches.length };
       if (fixture.data.intersections) {
         evalData.gridErrors = computeGridErrors(
           result.detectedIntersections, fixture.data.intersections,

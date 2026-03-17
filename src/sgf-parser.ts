@@ -2,15 +2,32 @@
  * SGF (Smart Game Format) recursive-descent parser.
  *
  * Usage:
- *   import { parse } from './sgf-parser.js';
+ *   import { parse } from './sgf-parser';
  *   const trees = parse(sgfString); // GameTree[]
- *
- * Types:
- *   GameTree = { nodes: Node[], variations: GameTree[] }
- *   Node     = { props: Record<string, string[]> }
  *
  * Throws an Error with line/column info on invalid input.
  */
+
+export interface Props {
+  [key: string]: string[];
+}
+
+export interface GameNode {
+  props: Props;
+}
+
+export interface GameTree {
+  nodes: GameNode[];
+  variations: GameTree[];
+}
+
+interface ParserState {
+  src: string;
+  pos: number;
+  line: number;
+  col: number;
+  nodeCount: number;
+}
 
 export const MAX_NODES = 10_000;
 export const MAX_BYTES = 1_000_000; // 1 MB
@@ -19,15 +36,15 @@ export const MAX_BYTES = 1_000_000; // 1 MB
  * Parse an SGF string into an array of game trees (a collection).
  * Most SGF files contain a single tree; check trees[0].
  */
-export function parse(src) {
+export function parse(src: string): GameTree[] {
   if (src.length > MAX_BYTES) {
     throw new Error(`SGF too large: ${src.length} bytes (limit ${MAX_BYTES})`);
   }
 
-  const st = { src, pos: 0, line: 1, col: 1, nodeCount: 0 };
+  const st: ParserState = { src, pos: 0, line: 1, col: 1, nodeCount: 0 };
   skipWS(st);
 
-  const trees = [];
+  const trees: GameTree[] = [];
   while (st.pos < src.length) {
     if (src[st.pos] !== '(') throw err(st, `expected '('`);
     trees.push(parseTree(st));
@@ -38,20 +55,20 @@ export function parse(src) {
   return trees;
 }
 
-function parseTree(st) {
+function parseTree(st: ParserState): GameTree {
   eat(st, '(');
   skipWS(st);
 
   if (st.pos >= st.src.length || st.src[st.pos] !== ';') {
     throw err(st, `expected ';' to open first node`);
   }
-  const nodes = [];
+  const nodes: GameNode[] = [];
   while (st.pos < st.src.length && st.src[st.pos] === ';') {
     nodes.push(parseNode(st));
     skipWS(st);
   }
 
-  const variations = [];
+  const variations: GameTree[] = [];
   while (st.pos < st.src.length && st.src[st.pos] === '(') {
     variations.push(parseTree(st));
     skipWS(st);
@@ -61,19 +78,19 @@ function parseTree(st) {
   return { nodes, variations };
 }
 
-function parseNode(st) {
+function parseNode(st: ParserState): GameNode {
   eat(st, ';');
   if (++st.nodeCount > MAX_NODES) throw err(st, `too many nodes (limit ${MAX_NODES})`);
   skipWS(st);
 
-  const props = {};
+  const props: Props = {};
   while (st.pos < st.src.length && isUpper(st.src.charCodeAt(st.pos))) {
     const name = parseIdent(st);
     skipWS(st);
     if (st.pos >= st.src.length || st.src[st.pos] !== '[') {
       throw err(st, `expected '[' after property '${name}'`);
     }
-    const values = [];
+    const values: string[] = [];
     while (st.pos < st.src.length && st.src[st.pos] === '[') {
       values.push(parseValue(st));
       skipWS(st);
@@ -84,14 +101,14 @@ function parseNode(st) {
   return { props };
 }
 
-function parseIdent(st) {
+function parseIdent(st: ParserState): string {
   const start = st.pos;
   while (st.pos < st.src.length && isUpper(st.src.charCodeAt(st.pos))) advance(st);
   if (st.pos === start) throw err(st, 'expected property identifier');
   return st.src.slice(start, st.pos);
 }
 
-function parseValue(st) {
+function parseValue(st: ParserState): string {
   eat(st, '[');
   let val = '';
   while (st.pos < st.src.length) {
@@ -117,7 +134,7 @@ function parseValue(st) {
 
 // ── Primitives ───────────────────────────────────────────────────────────────
 
-function advance(st) {
+function advance(st: ParserState): void {
   const ch = st.src[st.pos++];
   if (ch === '\n') {
     st.line++;
@@ -131,13 +148,13 @@ function advance(st) {
   }
 }
 
-function eat(st, ch) {
+function eat(st: ParserState, ch: string): void {
   if (st.pos >= st.src.length) throw err(st, `expected '${ch}', got end of input`);
   if (st.src[st.pos] !== ch) throw err(st, `expected '${ch}', got '${st.src[st.pos]}'`);
   advance(st);
 }
 
-function skipWS(st) {
+function skipWS(st: ParserState): void {
   while (st.pos < st.src.length) {
     const ch = st.src[st.pos];
     if (ch !== ' ' && ch !== '\t' && ch !== '\n' && ch !== '\r') break;
@@ -145,8 +162,8 @@ function skipWS(st) {
   }
 }
 
-function isUpper(code) { return code >= 65 && code <= 90; } // A–Z
+function isUpper(code: number): boolean { return code >= 65 && code <= 90; } // A–Z
 
-function err(st, msg) {
+function err(st: ParserState, msg: string): Error {
   return new Error(`SGF parse error at line ${st.line}, col ${st.col}: ${msg}`);
 }

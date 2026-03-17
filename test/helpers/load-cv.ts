@@ -4,6 +4,6 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { cv } = require('opencv-wasm');
-globalThis.cv = cv;
+Object.assign(globalThis, { cv });
 
 export { cv };

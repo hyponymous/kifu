@@ -12,7 +12,7 @@ import {
   ransacFilter1D,
   fitCylinder1D, evalCylinderDisp,
   radialPower, sampleDisc, sampleAnnulus,
-} from '../src/photo-pipeline.js';
+} from '../src/photo-pipeline';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -75,7 +75,7 @@ describe('kmeans2', () => {
 describe('medianStep', () => {
   it('returns median step of equally spaced positions', () => {
     const step = medianStep([10, 20, 30, 40, 50]);
-    assert.ok(Math.abs(step - 10) < 1);
+    assert.ok(Math.abs(step! - 10) < 1);
   });
   it('returns null for fewer than 2 positions', () => {
     assert.equal(medianStep([10]), null);
@@ -261,7 +261,7 @@ describe('generateSGF', () => {
       { r: 1, c: 1, color: 'W' },
       { r: 2, c: 2, color: '.' },
     ];
-    const sgf = generateSGF(stones, 9, null, 9);
+    const sgf = generateSGF(stones, 9, null, 9, null);
     assert.ok(sgf.includes('SZ[9]'));
     assert.ok(sgf.includes('AB[aa]'));
     assert.ok(sgf.includes('AW[bb]'));
@@ -283,7 +283,7 @@ describe('generateSGF', () => {
   it('applies edge offsets for elided boards', () => {
     const stones = [{ r: 0, c: 0, color: 'B' }];
     const elided = { top: true, left: true, bottom: false, right: false };
-    const sgf = generateSGF(stones, 7, elided, 7);
+    const sgf = generateSGF(stones, 7, elided, 7, null);
     assert.ok(sgf.includes('SZ[19]'));
     // Row offset = 19-7 = 12, col offset = 12
     // coord = chr(97 + 0 + 12) = 'm'

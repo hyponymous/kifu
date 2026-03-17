@@ -100,7 +100,7 @@ function printSummaryTable() {
   console.log(`${byExperiment.size} experiments from ${evalPath}`);
 }
 
-function printFixtureDrillDown(fixtureName) {
+function printFixtureDrillDown(fixtureName: string) {
   console.log('');
   console.log(`Fixture drill-down: ${fixtureName}`);
   console.log('='.repeat(78));
@@ -157,7 +157,7 @@ function printTimingBreakdown() {
   console.log('');
 }
 
-function padRow(col1, col2, col3, col4, col5) {
+function padRow(col1: string | number, col2: string | number, col3: string | number, col4: string | number, col5?: string | number) {
   return [
     String(col1).padEnd(22),
     String(col2).padStart(8),

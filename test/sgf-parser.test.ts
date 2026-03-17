@@ -1,16 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parse, MAX_NODES, MAX_BYTES } from '../src/sgf-parser.js';
+import { parse, MAX_NODES, MAX_BYTES } from '../src/sgf-parser';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function parseOne(src) {
+function parseOne(src: string) {
   const trees = parse(src);
   assert.equal(trees.length, 1);
   return trees[0];
 }
 
-function throws(src, pattern) {
+function throws(src: string, pattern: RegExp) {
   assert.throws(() => parse(src), { message: pattern });
 }
 
@@ -108,8 +108,8 @@ test('\\r\\n line endings count as one line', () => {
   // The error should report line 2, not line 3
   assert.throws(
     () => parse('(;\r\nB[pd]\r\nX'),
-    (e) => {
-      assert.match(e.message, /line 3/);
+    (e: unknown) => {
+      assert.match((e as Error).message, /line 3/);
       return true;
     }
   );
@@ -120,9 +120,9 @@ test('\\r\\n line endings count as one line', () => {
 test('error includes line and column', () => {
   assert.throws(
     () => parse('(;\nB[pd]\nBAD'),
-    (e) => {
-      assert.match(e.message, /line 3/);
-      assert.match(e.message, /col/);
+    (e: unknown) => {
+      assert.match((e as Error).message, /line 3/);
+      assert.match((e as Error).message, /col/);
       return true;
     }
   );
@@ -131,8 +131,8 @@ test('error includes line and column', () => {
 test('unterminated value reports correct position', () => {
   assert.throws(
     () => parse('(;C[unterminated)'),
-    (e) => {
-      assert.match(e.message, /unterminated property value/);
+    (e: unknown) => {
+      assert.match((e as Error).message, /unterminated property value/);
       return true;
     }
   );
