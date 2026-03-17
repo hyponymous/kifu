@@ -42,28 +42,6 @@
   </div>
 
   <div class="row">
-    <span class="param">
-      <label>Canny lo</label>
-      <input type="range" id="canny-lo" min="5" max="200" value="50">
-      <span class="val" id="canny-lo-val">50</span>
-    </span>
-    <span class="param">
-      <label>Canny hi</label>
-      <input type="range" id="canny-hi" min="20" max="400" value="125">
-      <span class="val" id="canny-hi-val">125</span>
-    </span>
-    <span class="param">
-      <label>Board</label>
-      <select id="board-size" style="font:inherit;background:#222;border:1px solid #444;color:#ccc;padding:0.2rem">
-        <option value="0">Auto</option>
-        <option value="19" selected>19×19</option>
-        <option value="13">13×13</option>
-        <option value="9">9×9</option>
-      </select>
-    </span>
-    <span class="param" title="Show classifier sampling zones on the stones overlay">
-      <label><input type="checkbox" id="show-patches"> Patches</label>
-    </span>
     <span class="param" title="Use Tesseract OCR to read move numbers on stones">
       <label><input type="checkbox" id="read-digits"> Read digits</label>
     </span>
@@ -228,29 +206,8 @@
 
     // ── Slider labels + localStorage persistence ───────────────────────────────
     const LS_PREFIX   = 'kifu-proto-';
-    const SLIDER_IDS  = ['canny-lo', 'canny-hi'];
-    const SELECT_IDS  = ['board-size'];
-    const CHECK_IDS   = ['show-patches', 'read-digits'];
+    const CHECK_IDS   = ['read-digits'];
 
-    for (const id of SLIDER_IDS) {
-      const saved = localStorage.getItem(LS_PREFIX + id);
-      if (saved !== null) { el(id).value = saved; }
-      const label = el(id + '-val');
-      label.textContent = el(id).value;
-      el(id).addEventListener('input', () => {
-        label.textContent = el(id).value;
-        localStorage.setItem(LS_PREFIX + id, el(id).value);
-        schedulePipeline();
-      });
-    }
-    for (const id of SELECT_IDS) {
-      const saved = localStorage.getItem(LS_PREFIX + id);
-      if (saved !== null) { el(id).value = saved; }
-      el(id).addEventListener('change', () => {
-        localStorage.setItem(LS_PREFIX + id, el(id).value);
-        schedulePipeline(false);
-      });
-    }
     for (const id of CHECK_IDS) {
       const saved = localStorage.getItem(LS_PREFIX + id);
       if (saved !== null) el(id).checked = saved === '1';
@@ -375,9 +332,6 @@
     async function runPipeline(fullImage) {
       if (!imageLoaded) return;
 
-      const cannyLo  = +el('canny-lo').value;
-      const cannyHi  = +el('canny-hi').value;
-      const hintN    = +el('board-size').value; // 0 = Auto
 
       const toDelete = [];
       const mat = m => { toDelete.push(m); return m; };
@@ -431,23 +385,18 @@
 
         const result = sharedRunPipeline(
           { colorMat: src, grayMat, width: src.cols, height: src.rows },
-          { cannyLo, cannyHi, hintN, onStage, onIntermediate });
+          { onStage, onIntermediate });
 
         if (!result) {
-          setStatus('Grid detection failed — try adjusting Canny or board size.');
+          setStatus('Grid detection failed.');
           drawTiming(stages);
           return;
-        }
-
-        // Reflect auto-detected board size in selector
-        if (hintN === 0) {
-          el('board-size').value = String(result.nRows);
         }
 
         // Draw stones overlay on dewarped canvas
         const { classResult, finalDetection } = result;
         const stones = classResult.stones;
-        drawStonesOverlay(stones, finalDetection.step, lastDbgInfo);
+        drawStonesOverlay(stones, finalDetection.step);
         updateLabel('canvas-stones');
 
         // ── Digit detection on stones (Tesseract OCR) ──────────────────────
@@ -829,29 +778,13 @@
     }
 
     // ── Stones overlay on dewarped canvas ───────────────────────────────────────
-    function drawStonesOverlay(stones, step, dbgInfo) {
+    function drawStonesOverlay(stones, step) {
       const canvas = el('canvas-stones');
       const src = el('canvas-dewarped');
       canvas.width  = src.width;
       canvas.height = src.height;
       const ctx = canvas.getContext('2d');
       ctx.drawImage(src, 0, 0);
-
-      // Optional: classifier sampling zones
-      if (el('show-patches').checked && dbgInfo) {
-        const { ringIn, ringOut, bodyAnnIn, bodyAnnOut } = dbgInfo;
-        ctx.lineWidth = 1;
-        for (const s of stones) {
-          ctx.strokeStyle = s._isStone ? 'rgba(80,230,80,0.7)' : 'rgba(230,80,80,0.7)';
-          ctx.beginPath(); ctx.arc(s.cx, s.cy, ringOut, 0, 2 * Math.PI); ctx.stroke();
-          ctx.beginPath(); ctx.arc(s.cx, s.cy, ringIn,  0, 2 * Math.PI); ctx.stroke();
-          if (s._isStone) {
-            ctx.strokeStyle = s.color === 'B' ? 'rgba(80,150,255,0.8)' : 'rgba(255,210,60,0.8)';
-            ctx.beginPath(); ctx.arc(s.cx, s.cy, bodyAnnOut, 0, 2 * Math.PI); ctx.stroke();
-            ctx.beginPath(); ctx.arc(s.cx, s.cy, bodyAnnIn,  0, 2 * Math.PI); ctx.stroke();
-          }
-        }
-      }
 
       const r = Math.max(3, Math.floor(step * 0.38));
       ctx.lineWidth = 1.5;
