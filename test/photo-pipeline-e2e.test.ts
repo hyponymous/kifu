@@ -147,7 +147,15 @@ describe('photo pipeline e2e', () => {
     it(`matches fixture: ${fixture.name}`, async () => {
       const imagePath = fixture.data.image;
       const image = await loadImage(imagePath);
-      const result = runPipeline(image);
+      let result;
+      try {
+        result = runPipeline(image);
+      } finally {
+        // Delete input mats immediately — real-board photos are ~47 MB each
+        // and the WASM heap exhausts if they accumulate across fixtures.
+        image.colorMat.delete();
+        image.grayMat.delete();
+      }
       assert.ok(result, `Pipeline failed for ${imagePath}`);
 
       const expectedRows = fixture.data.boardRows;
