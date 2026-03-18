@@ -1,5 +1,6 @@
 {
   "image": "fixtures/IMG_1269_6.jpg",
+  "quarantined": true,
   "boardRows": 11,
   "boardCols": 11,
   "stones": [

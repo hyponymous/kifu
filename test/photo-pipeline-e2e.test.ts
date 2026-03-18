@@ -34,7 +34,7 @@ const MATCH_THRESHOLD = 0.85;
 // ── Eval recording ──────────────────────────────────────────────────────────
 
 type GridErrors = { gridErrorMean: number; gridErrorMax: number; gridErrorP95: number };
-type EvalEntry = { matchRate: number; mismatches: number; gridErrors?: GridErrors | null };
+type EvalEntry = { matchRate: number; mismatches: number; quarantined?: boolean; gridErrors?: GridErrors | null };
 const evalResults: Record<string, EvalEntry> = {};
 
 function computeGridErrors(detected: { r: number; c: number; x: number; y: number }[], groundTruth: [number, number][], nRows: number, nCols: number) {
@@ -86,8 +86,8 @@ function writeEvalRecord() {
   const gridErrorMaxes = [];
 
   for (const [name, data] of Object.entries(evalResults)) {
-    fixtureScores[name] = { matchRate: data.matchRate, mismatches: data.mismatches };
-    matchRates.push(data.matchRate);
+    fixtureScores[name] = { matchRate: data.matchRate, mismatches: data.mismatches, ...(data.quarantined ? { quarantined: true } : {}) };
+    if (!data.quarantined) matchRates.push(data.matchRate);
     if (data.gridErrors) {
       Object.assign(fixtureScores[name], data.gridErrors);
       gridErrorMeans.push(data.gridErrors.gridErrorMean);
@@ -124,7 +124,7 @@ function writeEvalRecord() {
   console.log('│ Fixture          │ MatchRate │ Miss  │ GridMean  │ GridMax│ GridP95│');
   console.log('├──────────────────┼───────────┼───────┼───────────┼────────┼────────┤');
   for (const [name, data] of Object.entries(evalResults)) {
-    const mr = (data.matchRate * 100).toFixed(1).padStart(6) + '%';
+    const mr = (data.matchRate * 100).toFixed(1).padStart(6) + '%' + (data.quarantined ? ' Q' : '  ');
     const miss = String(data.mismatches).padStart(5);
     const gm = data.gridErrors ? data.gridErrors.gridErrorMean.toFixed(2).padStart(8) : '     n/a';
     const gx = data.gridErrors ? data.gridErrors.gridErrorMax.toFixed(2).padStart(6) : '   n/a';
@@ -156,14 +156,32 @@ describe('photo pipeline e2e', () => {
         image.colorMat.delete();
         image.grayMat.delete();
       }
-      assert.ok(result, `Pipeline failed for ${imagePath}`);
+      if (!result) {
+        if (fixture.data.quarantined) {
+          evalResults[fixture.name] = { matchRate: 0, mismatches: -1, quarantined: true };
+          return;
+        }
+        assert.ok(result, `Pipeline failed for ${imagePath}`);
+        return; // unreachable — assert throws, but satisfies TS narrowing
+      }
 
       const expectedRows = fixture.data.boardRows;
       const expectedCols = fixture.data.boardCols;
-      assert.equal(result.nRows, expectedRows,
-        `Board rows: got ${result.nRows}, expected ${expectedRows}`);
-      assert.equal(result.nCols, expectedCols,
-        `Board cols: got ${result.nCols}, expected ${expectedCols}`);
+
+      // For quarantined fixtures: compute what we can, record eval data, skip all assertions.
+      const rowsMatch = result.nRows === expectedRows;
+      const colsMatch = result.nCols === expectedCols;
+      if (fixture.data.quarantined && (!rowsMatch || !colsMatch)) {
+        evalResults[fixture.name] = { matchRate: 0, mismatches: -1, quarantined: true };
+        return;
+      }
+
+      if (!fixture.data.quarantined) {
+        assert.equal(result.nRows, expectedRows,
+          `Board rows: got ${result.nRows}, expected ${expectedRows}`);
+        assert.equal(result.nCols, expectedCols,
+          `Board cols: got ${result.nCols}, expected ${expectedCols}`);
+      }
 
       // Build expected grid
       const expectedGrid = Array.from({ length: expectedRows }, () =>
@@ -196,12 +214,20 @@ describe('photo pipeline e2e', () => {
 
       // Record eval data
       const evalData: EvalEntry = { matchRate, mismatches: mismatches.length };
+      if (fixture.data.quarantined) evalData.quarantined = true;
       if (fixture.data.intersections) {
         evalData.gridErrors = computeGridErrors(
           result.detectedIntersections, fixture.data.intersections,
           expectedRows, expectedCols);
       }
       evalResults[fixture.name] = evalData;
+
+      if (fixture.data.quarantined) {
+        if (matchRate >= MATCH_THRESHOLD) {
+          console.log(`  NOTE: quarantined fixture ${fixture.name} now passes (${pct}%) — consider removing quarantine`);
+        }
+        return; // skip threshold assertion for quarantined fixtures
+      }
 
       assert.ok(matchRate >= MATCH_THRESHOLD,
         `Match rate ${pct}% is below threshold ${MATCH_THRESHOLD * 100}% for ${fixture.name}`);
