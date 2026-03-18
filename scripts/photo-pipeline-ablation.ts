@@ -143,10 +143,11 @@ async function main() {
         image.grayMat.delete();
       }
 
+      const quarantined = !!fixture.data.quarantined;
+
       if (!result) {
-        fixtureResults[fixture.name] = { matchRate: 0, mismatches: -1, timing };
-        matchRates.push(0);
-        failures++;
+        fixtureResults[fixture.name] = { matchRate: 0, mismatches: -1, timing, ...(quarantined ? { quarantined: true } : {}) };
+        if (!quarantined) { matchRates.push(0); failures++; }
         continue;
       }
 
@@ -154,9 +155,8 @@ async function main() {
       const expectedRows = fixture.data.boardRows;
       const expectedCols = fixture.data.boardCols;
       if (result.nRows !== expectedRows || result.nCols !== expectedCols) {
-        fixtureResults[fixture.name] = { matchRate: 0, mismatches: -1, timing };
-        matchRates.push(0);
-        failures++;
+        fixtureResults[fixture.name] = { matchRate: 0, mismatches: -1, timing, ...(quarantined ? { quarantined: true } : {}) };
+        if (!quarantined) { matchRates.push(0); failures++; }
         continue;
       }
 
@@ -176,9 +176,9 @@ async function main() {
 
       const matchRate = +(matches / total).toFixed(4);
       const mismatches = total - matches;
-      matchRates.push(matchRate);
+      if (!quarantined) matchRates.push(matchRate);
 
-      const entry = { matchRate, mismatches, timing };
+      const entry: Record<string, unknown> = { matchRate, mismatches, timing, ...(quarantined ? { quarantined: true } : {}) };
 
       // Grid errors
       if (fixture.data.intersections) {
