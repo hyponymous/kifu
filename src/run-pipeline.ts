@@ -39,6 +39,7 @@ export interface PipelineOpts {
   claheEnabled?: boolean;
   classifierMode?: ClassifierMode;
   houghBlurSize?: number;
+  circleParam2?: number;
   /** When classifierMode is 'onnx', this must be provided (pre-loaded ONNX session wrapper). */
   classifyIntersections?: IntersectionClassifier;
   rectCorners?: Point[];
@@ -104,6 +105,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
   const claheEnabled = opts.claheEnabled ?? DEFAULTS.claheEnabled;
   const classifierMode = opts.classifierMode ?? DEFAULTS.classifierMode;
   const houghBlurSize = opts.houghBlurSize ?? DEFAULTS.houghBlurSize;
+  const circleParam2 = opts.circleParam2 ?? DEFAULTS.circleParam2;
   const classifyIntersections = opts.classifyIntersections ?? null;
   const lockedRectCorners = opts.rectCorners ?? null;
   const forcedGrid = opts.forcedGrid ?? null;
@@ -205,8 +207,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
 
     // ── Grid detection ────────────────────────────────────────────────────
     const detection = timed('detectGrid', () => {
-      const circleSens = 24;
-      return fns.detectGrid(rectGray, hintN, circleSens, { forceRows, forceCols, gridBounds, skipTrimEdges, houghBlurSize });
+      return fns.detectGrid(rectGray, hintN, circleParam2, { forceRows, forceCols, gridBounds, skipTrimEdges, houghBlurSize });
     });
     if (!detection) return null;
     if (onIntermediate) onIntermediate('detectGrid', { detection });
@@ -289,8 +290,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
       const dewarpedGray = mat(fns.enhanceGray(dewarpedGrayRaw, false, { claheEnabled }));
 
       if (reDetect && finalDetection === detection) {
-        const circleSens = 24;
-        const detection2 = fns.detectGrid(dewarpedGray, hintN, circleSens, { forceRows, forceCols, skipTrimEdges, houghBlurSize });
+        const detection2 = fns.detectGrid(dewarpedGray, hintN, circleParam2, { forceRows, forceCols, skipTrimEdges, houghBlurSize });
         if (detection2
           && detection2.rowPos.length === nRows
           && detection2.colPos.length === nCols) {

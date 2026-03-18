@@ -25,9 +25,10 @@ export interface PipelineDefaults {
   skipTrimEdges:  TunableVariants<boolean>;
   rpThreshRatio:  TunableVariants<number>;
   gradFloor:      TunableVariants<number>;
-  claheEnabled:   TunableVariants<boolean>;
-  classifierMode: TunableVariants<ClassifierMode>;
-  houghBlurSize:  TunableVariants<number>;
+  claheEnabled:    TunableVariants<boolean>;
+  classifierMode:  TunableVariants<ClassifierMode>;
+  houghBlurSize:   TunableVariants<number>;
+  circleParam2:    TunableVariants<number>;
 }
 
 export const defaults: PipelineDefaults = {
@@ -49,6 +50,10 @@ export const defaults: PipelineDefaults = {
   // default 3×3 blur and produces hundreds of spurious Hough lines.
   // Larger kernels suppress grain while preserving the long grid-line edges.
   houghBlurSize:  { active: 3,        variants: { 'hough-blur-5': 5, 'hough-blur-7': 7, 'hough-blur-9': 9 } },
+  // HoughCircles accumulator threshold (param2). Lower = more circles detected,
+  // higher = fewer false positives. Real stones (3D with specular highlights) need
+  // a lower threshold than flat diagram circles.
+  circleParam2:   { active: 24,       variants: { 'circle-p2-12': 12, 'circle-p2-16': 16 } },
 };
 
 export interface ActiveDefaults {
@@ -64,6 +69,7 @@ export interface ActiveDefaults {
   claheEnabled: boolean;
   classifierMode: ClassifierMode;
   houghBlurSize: number;
+  circleParam2: number;
 }
 
 /** Return a plain { key: active } object for use as pipeline opts. */
@@ -81,5 +87,6 @@ export function activeDefaults(): ActiveDefaults {
     claheEnabled:   defaults.claheEnabled.active,
     classifierMode: defaults.classifierMode.active,
     houghBlurSize:  defaults.houghBlurSize.active,
+    circleParam2:   defaults.circleParam2.active,
   };
 }

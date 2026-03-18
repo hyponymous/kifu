@@ -903,13 +903,38 @@ function detectGrid(grayMat: CvMat, hintN: number, circleSens: number = 21, { fo
   }
 
   // 5. Compute step hint (needed for Hough clustering below)
+  //
+  // Sanity-check radiusStep against estStep before trusting it:
+  //   - Too few circles → unreliable median → fall back
+  //   - radiusStep << estStep → likely detecting inner highlight at half radius;
+  //     try doubling first (covers real-stone specular-highlight case)
+  //   - radiusStep >> estStep → likely large false-positive circles; fall back
+  const MIN_CIRCLES_RELIABLE = 8;
+  const RATIO_MIN = 0.6, RATIO_MAX = 2.5;
   let stepHint: number;
-  if (radiusStep) {
-    stepHint = radiusStep;
+  let stepHintSrc = 'fallback';
+  if (radiusStep && rawCircles.length >= MIN_CIRCLES_RELIABLE) {
+    const ratio = radiusStep / estStep;
+    if (ratio >= RATIO_MIN && ratio <= RATIO_MAX) {
+      stepHint = radiusStep;
+      stepHintSrc = 'radiusStep';
+    } else if (ratio < RATIO_MIN) {
+      // Possibly detecting inner features at ~half radius; double and re-check.
+      const doubled = radiusStep * 2;
+      const dRatio = doubled / estStep;
+      if (dRatio >= RATIO_MIN && dRatio <= RATIO_MAX) {
+        stepHint = doubled;
+        stepHintSrc = 'radiusStep×2';
+      } else {
+        stepHint = estStep;
+      }
+    } else {
+      stepHint = estStep;
+    }
   } else {
-    stepHint = nnStep || estStep;
+    stepHint = estStep;
   }
-  console.log(`[detectGrid] circles=${rawCircles.length} medRadius=${medRadius?.toFixed(1) ?? 'null'} radiusStep=${radiusStep?.toFixed(1) ?? 'null'} nnStep=${nnStep?.toFixed(1) ?? 'null'} stepHint=${stepHint.toFixed(1)}`);
+  console.log(`[detectGrid] circles=${rawCircles.length} medRadius=${medRadius?.toFixed(1) ?? 'null'} radiusStep=${radiusStep?.toFixed(1) ?? 'null'} nnStep=${nnStep?.toFixed(1) ?? 'null'} stepHint=${stepHint.toFixed(1)} (${stepHintSrc})`);
 
   // 6. Build vote pools
   const hVotes = [];
@@ -1135,8 +1160,10 @@ function enhanceGray(grayMat: CvMat, usePercentileNorm: boolean = true, opts: { 
   // CLAHE (Contrast Limited Adaptive Histogram Equalization) works tile-by-tile,
   // avoiding the over-amplification of noise that global equalization causes on
   // real board photos with wood grain. Preferred over percentile norm for photos.
-  if (opts.claheEnabled) {
-    const clahe = cv.createCLAHE(2.0, new cv.Size(8, 8));
+  // cv.createCLAHE is not available in all opencv-wasm builds (e.g. the Node.js
+  // test build). Fall back silently to the standard path if it's missing.
+  if (opts.claheEnabled && typeof (cv as unknown as Record<string, unknown>).createCLAHE === 'function') {
+    const clahe = (cv as unknown as { createCLAHE: (clip: number, size: CvSize) => { apply: (src: CvMat, dst: CvMat) => void; delete: () => void } }).createCLAHE(2.0, new cv.Size(8, 8));
     const out = new cv.Mat();
     clahe.apply(grayMat, out);
     clahe.delete();
