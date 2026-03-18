@@ -38,6 +38,7 @@ export interface PipelineOpts {
   gradFloor?: number;
   claheEnabled?: boolean;
   classifierMode?: ClassifierMode;
+  houghBlurSize?: number;
   /** When classifierMode is 'onnx', this must be provided (pre-loaded ONNX session wrapper). */
   classifyIntersections?: IntersectionClassifier;
   rectCorners?: Point[];
@@ -102,6 +103,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
   const gradFloor = opts.gradFloor ?? DEFAULTS.gradFloor;
   const claheEnabled = opts.claheEnabled ?? DEFAULTS.claheEnabled;
   const classifierMode = opts.classifierMode ?? DEFAULTS.classifierMode;
+  const houghBlurSize = opts.houghBlurSize ?? DEFAULTS.houghBlurSize;
   const classifyIntersections = opts.classifyIntersections ?? null;
   const lockedRectCorners = opts.rectCorners ?? null;
   const forcedGrid = opts.forcedGrid ?? null;
@@ -204,7 +206,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
     // ── Grid detection ────────────────────────────────────────────────────
     const detection = timed('detectGrid', () => {
       const circleSens = 24;
-      return fns.detectGrid(rectGray, hintN, circleSens, { forceRows, forceCols, gridBounds, skipTrimEdges });
+      return fns.detectGrid(rectGray, hintN, circleSens, { forceRows, forceCols, gridBounds, skipTrimEdges, houghBlurSize });
     });
     if (!detection) return null;
     if (onIntermediate) onIntermediate('detectGrid', { detection });
@@ -288,7 +290,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
 
       if (reDetect && finalDetection === detection) {
         const circleSens = 24;
-        const detection2 = fns.detectGrid(dewarpedGray, hintN, circleSens, { forceRows, forceCols, skipTrimEdges });
+        const detection2 = fns.detectGrid(dewarpedGray, hintN, circleSens, { forceRows, forceCols, skipTrimEdges, houghBlurSize });
         if (detection2
           && detection2.rowPos.length === nRows
           && detection2.colPos.length === nCols) {

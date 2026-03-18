@@ -707,7 +707,7 @@ function findGridBounds(grayMat: CvMat, cannyLo: number = 50, cannyHi: number = 
 
 // ── detectGrid ──────────────────────────────────────────────────────────────
 
-function detectGrid(grayMat: CvMat, hintN: number, circleSens: number = 21, { forceRows, forceCols, gridBounds, skipTrimEdges }: { forceRows?: number; forceCols?: number; gridBounds?: GridBounds | null; skipTrimEdges?: boolean } = {}): Detection | null {
+function detectGrid(grayMat: CvMat, hintN: number, circleSens: number = 21, { forceRows, forceCols, gridBounds, skipTrimEdges, houghBlurSize }: { forceRows?: number; forceCols?: number; gridBounds?: GridBounds | null; skipTrimEdges?: boolean; houghBlurSize?: number } = {}): Detection | null {
   const W      = grayMat.cols, H = grayMat.rows;
   const refN   = hintN > 0 ? hintN : 19;
   const estStep = W / (refN + 1);
@@ -797,7 +797,8 @@ function detectGrid(grayMat: CvMat, hintN: number, circleSens: number = 21, { fo
   // 3. HoughLines (with circle masking)
   const edgesMat = new cv.Mat();
   const blurMat = new cv.Mat();
-  cv.GaussianBlur(grayMat, blurMat, new cv.Size(3, 3), 0);
+  const blurKernel = houghBlurSize ?? 3;
+  cv.GaussianBlur(grayMat, blurMat, new cv.Size(blurKernel, blurKernel), 0);
   cv.Canny(blurMat, edgesMat, 50, 125);
   blurMat.delete();
 

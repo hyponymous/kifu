@@ -27,6 +27,7 @@ export interface PipelineDefaults {
   gradFloor:      TunableVariants<number>;
   claheEnabled:   TunableVariants<boolean>;
   classifierMode: TunableVariants<ClassifierMode>;
+  houghBlurSize:  TunableVariants<number>;
 }
 
 export const defaults: PipelineDefaults = {
@@ -43,6 +44,11 @@ export const defaults: PipelineDefaults = {
   // Enable via ablation ('clahe' variant) or for real-board photo inputs.
   claheEnabled:   { active: false,    variants: { 'clahe': true } },
   classifierMode: { active: 'kmeans', variants: { 'onnx-classifier': 'onnx' } },
+  // Gaussian blur kernel applied inside detectGrid before Canny→HoughLines.
+  // Real-board photos have wood grain (5–10px features) that survives the
+  // default 3×3 blur and produces hundreds of spurious Hough lines.
+  // Larger kernels suppress grain while preserving the long grid-line edges.
+  houghBlurSize:  { active: 3,        variants: { 'hough-blur-5': 5, 'hough-blur-7': 7, 'hough-blur-9': 9 } },
 };
 
 export interface ActiveDefaults {
@@ -57,6 +63,7 @@ export interface ActiveDefaults {
   gradFloor: number;
   claheEnabled: boolean;
   classifierMode: ClassifierMode;
+  houghBlurSize: number;
 }
 
 /** Return a plain { key: active } object for use as pipeline opts. */
@@ -73,5 +80,6 @@ export function activeDefaults(): ActiveDefaults {
     gradFloor:      defaults.gradFloor.active,
     claheEnabled:   defaults.claheEnabled.active,
     classifierMode: defaults.classifierMode.active,
+    houghBlurSize:  defaults.houghBlurSize.active,
   };
 }
