@@ -101,6 +101,9 @@
 
     let imageLoaded = false;
     let currentFilename = '';
+    // Project-root-relative image path for the fixture JSON (e.g. fixtures/real/IMG_1395.JPG).
+    // Resolved by probing /kifu/fixtures/ and /kifu/fixtures/real/ after image load.
+    let currentImagePath = '';
     let nRows = 0, nCols = 0;
     let editableStones = null; // 2D array [r][c] = 'B' | 'W' | '.'
     let lastRectCorners = null;
@@ -122,9 +125,24 @@
     // Dumbbell overlay toggle
     let showDumbbells = false;
 
+    // ── Resolve project-root-relative image path ────────────────────────────
+    // Probes /kifu/fixtures/ and /kifu/fixtures/real/ to find where the image
+    // actually lives in the repo, so the fixture JSON stores the correct path.
+    async function resolveImagePath(filename) {
+      for (const dir of ['fixtures/real', 'fixtures']) {
+        try {
+          const r = await fetch(`/kifu/${dir}/${filename}`, { method: 'HEAD' });
+          if (r.ok) return `${dir}/${filename}`;
+        } catch {}
+      }
+      return `fixtures/real/${filename}`; // best-guess default for new real photos
+    }
+
     // ── Load image ──────────────────────────────────────────────────────────
     function loadImage(file, { autoRun = false } = {}) {
       currentFilename = file.name;
+      currentImagePath = '';
+      resolveImagePath(file.name).then(p => { currentImagePath = p; });
       const url = URL.createObjectURL(file);
       const img = new Image();
       img.onload = () => {
@@ -767,7 +785,17 @@
             { colorMat: src, grayMat, width: src.cols, height: src.rows },
             { hintN, forceRows, forceCols });
           if (!pipeResult) {
-            el('status').textContent = 'Pipeline failed (grid detection).';
+            // Pipeline failed, but a fixture JSON may already exist for this image.
+            // Set fallback rect corners (full image) so forced-grid reclassification
+            // can still work if the fixture has intersection data.
+            lastRectCorners = [
+              { x: 0, y: 0 }, { x: src.cols - 1, y: 0 },
+              { x: src.cols - 1, y: src.rows - 1 }, { x: 0, y: src.rows - 1 },
+            ];
+            lastRectW = src.cols;
+            lastRectH = src.rows;
+            el('status').textContent = 'Pipeline failed — trying to load fixture JSON…';
+            tryLoadFixture();
             return;
           }
           nRows = pipeResult.nRows;
@@ -835,16 +863,25 @@
     function tryLoadFixture() {
       if (!currentFilename) return;
       const base = currentFilename.replace(/\.[^.]+$/, '');
-      const fixturePath = `../fixtures/${base}.fixture.json`;
-      // Cache-bust to always get fresh fixture data
-      fetch(`${fixturePath}?t=${Date.now()}`).then(r => {
-        if (!r.ok) return;
-        return r.json();
-      }).then(fixture => {
-        if (!fixture) return;
-        applyFixture(fixture);
-        el('status').textContent = `Loaded fixture for ${currentFilename}. Click to edit stones.`;
-      }).catch(() => {});
+      const t = Date.now();
+      // Try fixtures/real/ first (real board photos), then fixtures/ (diagrams).
+      // Paths are absolute to avoid ambiguity under the /kifu/ Vite base.
+      const candidates = [
+        `/kifu/fixtures/real/${base}.fixture.json`,
+        `/kifu/fixtures/${base}.fixture.json`,
+      ];
+      const tryNext = (i) => {
+        if (i >= candidates.length) return;
+        fetch(`${candidates[i]}?t=${t}`).then(r => {
+          if (!r.ok) { tryNext(i + 1); return; }
+          return r.json();
+        }).then(fixture => {
+          if (!fixture) return;
+          applyFixture(fixture);
+          el('status').textContent = `Loaded fixture for ${currentFilename}. Click to edit stones.`;
+        }).catch(() => tryNext(i + 1));
+      };
+      tryNext(0);
     }
 
     // ── Draw interactive board ──────────────────────────────────────────────
@@ -971,11 +1008,9 @@
         }
       }
 
-      // Resolve filename: try to use ../fixtures/ path
-      let image = currentFilename;
-      if (!image.startsWith('../fixtures/')) {
-        image = '../fixtures/' + image;
-      }
+      // Use the probed project-root-relative path (e.g. fixtures/real/IMG_1395.JPG).
+      // Falls back to best-guess if resolveImagePath hasn't resolved yet.
+      const image = currentImagePath || `fixtures/real/${currentFilename}`;
 
       const fixture = { image, boardRows: R, boardCols: C, stones };
       if (origIntersections) fixture.intersections = origIntersections;
