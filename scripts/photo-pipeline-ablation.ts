@@ -20,14 +20,20 @@ import { performance } from 'node:perf_hooks';
 
 // ── Fixture discovery ───────────────────────────────────────────────────────
 
-const fixtureDir = 'fixtures';
-const fixtureFiles = readdirSync(fixtureDir)
-  .filter(f => f.endsWith('.fixture.json'))
-  .map(f => ({
-    name: f.replace('.fixture.json', ''),
-    path: join(fixtureDir, f),
-    data: JSON.parse(readFileSync(join(fixtureDir, f), 'utf8')),
-  }));
+const fixtureDirs = ['fixtures', 'fixtures/real'];
+const fixtureFiles = fixtureDirs.flatMap(dir => {
+  try {
+    return readdirSync(dir)
+      .filter(f => f.endsWith('.fixture.json'))
+      .map(f => ({
+        name: f.replace('.fixture.json', ''),
+        path: join(dir, f),
+        data: JSON.parse(readFileSync(join(dir, f), 'utf8')),
+      }));
+  } catch {
+    return [];
+  }
+});
 
 if (fixtureFiles.length === 0) {
   console.error('No fixture files found. Run generate-fixtures.js first.');
@@ -61,7 +67,11 @@ function buildParamExperiments() {
       byName.get(expName)[key] = value;
     }
   }
-  return [...byName.entries()].map(([name, opts]) => ({ name, opts }));
+  // Skip experiments that require external resources not available at ablation time.
+  const SKIP = new Set(['onnx-classifier']);
+  return [...byName.entries()]
+    .filter(([name]) => !SKIP.has(name))
+    .map(([name, opts]) => ({ name, opts }));
 }
 
 const EXPERIMENTS = [
