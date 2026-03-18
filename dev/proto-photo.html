@@ -47,6 +47,88 @@
     </span>
   </div>
 
+  <details id="settings-panel" open style="margin-bottom:0.75rem">
+    <summary style="cursor:pointer;font-size:0.78rem;color:#666;user-select:none">Pipeline settings</summary>
+    <div style="margin-top:0.5rem;display:flex;flex-wrap:wrap;gap:0.4rem 1.4rem;align-items:center">
+
+      <span class="param">
+        <label for="s-hintN">board hint</label>
+        <select id="s-hintN" style="background:#222;border:1px solid #444;color:#ccc;font:inherit;padding:1px 3px">
+          <option value="0">auto</option>
+          <option value="9">9×9</option>
+          <option value="13">13×13</option>
+          <option value="19">19×19</option>
+        </select>
+      </span>
+
+      <span class="param">
+        <label for="s-circleParam2">circleP2</label>
+        <input type="range" id="s-circleParam2" min="4" max="50" step="1">
+        <span class="val" id="s-circleParam2-val"></span>
+      </span>
+
+      <span class="param">
+        <label for="s-houghBlurSize">houghBlur</label>
+        <select id="s-houghBlurSize" style="background:#222;border:1px solid #444;color:#ccc;font:inherit;padding:1px 3px">
+          <option value="1">1</option>
+          <option value="3">3</option>
+          <option value="5">5</option>
+          <option value="7">7</option>
+          <option value="9">9</option>
+        </select>
+      </span>
+
+      <span class="param">
+        <label for="s-cannyLo">cannyLo</label>
+        <input type="range" id="s-cannyLo" min="10" max="150" step="5">
+        <span class="val" id="s-cannyLo-val"></span>
+      </span>
+
+      <span class="param">
+        <label for="s-cannyHi">cannyHi</label>
+        <input type="range" id="s-cannyHi" min="50" max="400" step="5">
+        <span class="val" id="s-cannyHi-val"></span>
+      </span>
+
+      <span class="param">
+        <label for="s-rpThreshRatio">rpThresh</label>
+        <input type="range" id="s-rpThreshRatio" min="0.50" max="0.99" step="0.01">
+        <span class="val" id="s-rpThreshRatio-val"></span>
+      </span>
+
+      <span class="param">
+        <label for="s-gradFloor">gradFloor</label>
+        <input type="range" id="s-gradFloor" min="0" max="200" step="8">
+        <span class="val" id="s-gradFloor-val"></span>
+      </span>
+
+      <span class="param">
+        <label for="s-ransacThr">ransacThr</label>
+        <input type="range" id="s-ransacThr" min="0.5" max="10" step="0.1">
+        <span class="val" id="s-ransacThr-val"></span>
+      </span>
+
+      <span class="param">
+        <label><input type="checkbox" id="s-claheEnabled"> CLAHE</label>
+      </span>
+
+      <span class="param">
+        <label><input type="checkbox" id="s-reDetect"> reDetect</label>
+      </span>
+
+      <span class="param">
+        <label><input type="checkbox" id="s-combinedGrid"> combinedGrid</label>
+      </span>
+
+      <span class="param">
+        <label><input type="checkbox" id="s-skipTrimEdges"> skipTrimEdges</label>
+      </span>
+
+      <button id="s-copy" style="font-size:0.72rem;padding:0.15rem 0.5rem">Copy settings</button>
+      <button id="s-reset" style="font-size:0.72rem;padding:0.15rem 0.5rem">Reset</button>
+    </div>
+  </details>
+
   <div class="stages">
     <div class="stage">
       <div class="stage-label">input</div>
@@ -150,6 +232,7 @@
       generateSGF,
     } from '../photo-pipeline';
     import { runPipeline as sharedRunPipeline } from '../run-pipeline';
+    import { activeDefaults } from '../pipeline-defaults';
 
     // ── Helpers ────────────────────────────────────────────────────────────────
     function el(id) { return document.getElementById(id); }
@@ -204,17 +287,108 @@
     let imageLoaded   = false;
     let videoStream   = null;
 
-    // ── Slider labels + localStorage persistence ───────────────────────────────
-    const LS_PREFIX   = 'kifu-proto-';
-    const CHECK_IDS   = ['read-digits'];
+    // ── Settings persistence + pipeline opts ──────────────────────────────────
+    const LS_PREFIX = 'kifu-proto-';
+    const DEFS = activeDefaults();
 
-    for (const id of CHECK_IDS) {
-      const saved = localStorage.getItem(LS_PREFIX + id);
-      if (saved !== null) el(id).checked = saved === '1';
-      el(id).addEventListener('change', () => {
-        localStorage.setItem(LS_PREFIX + id, el(id).checked ? '1' : '0');
-        schedulePipeline(false);
-      });
+    // Slider controls: [id, defaultValue]
+    const SLIDERS = [
+      ['s-circleParam2',  DEFS.circleParam2],
+      ['s-cannyLo',       DEFS.cannyLo],
+      ['s-cannyHi',       DEFS.cannyHi],
+      ['s-rpThreshRatio', DEFS.rpThreshRatio],
+      ['s-gradFloor',     DEFS.gradFloor],
+      ['s-ransacThr',     DEFS.ransacThr],
+    ];
+    // Select controls: [id, defaultValue]
+    const SELECTS = [
+      ['s-hintN',         '0'],
+      ['s-houghBlurSize', String(DEFS.houghBlurSize)],
+    ];
+    // Checkbox controls: [id, defaultValue]
+    const CHECKS = [
+      ['read-digits',    false],
+      ['s-claheEnabled', DEFS.claheEnabled],
+      ['s-reDetect',     DEFS.reDetect],
+      ['s-combinedGrid', DEFS.combinedGrid],
+      ['s-skipTrimEdges',DEFS.skipTrimEdges],
+    ];
+
+    function loadSettings() {
+      for (const [id, def] of SLIDERS) {
+        const saved = localStorage.getItem(LS_PREFIX + id);
+        el(id).value = saved !== null ? saved : def;
+        el(id + '-val').textContent = el(id).value;
+      }
+      for (const [id, def] of SELECTS) {
+        const saved = localStorage.getItem(LS_PREFIX + id);
+        el(id).value = saved !== null ? saved : def;
+      }
+      for (const [id, def] of CHECKS) {
+        const saved = localStorage.getItem(LS_PREFIX + id);
+        el(id).checked = saved !== null ? saved === '1' : def;
+      }
+    }
+    loadSettings();
+
+    function saveAndRerun(e) {
+      const id = e.target.id;
+      if (e.target.type === 'checkbox') {
+        localStorage.setItem(LS_PREFIX + id, e.target.checked ? '1' : '0');
+      } else {
+        localStorage.setItem(LS_PREFIX + id, e.target.value);
+        const valEl = el(id + '-val');
+        if (valEl) valEl.textContent = e.target.value;
+      }
+      schedulePipeline();
+    }
+    for (const [id] of [...SLIDERS, ...SELECTS, ...CHECKS]) {
+      el(id).addEventListener('change', saveAndRerun);
+      if (el(id).type === 'range') el(id).addEventListener('input', saveAndRerun);
+    }
+
+    el('s-copy').addEventListener('click', () => {
+      const settings = {};
+      for (const [id] of SLIDERS) settings[id.replace('s-', '')] = parseFloat(el(id).value);
+      for (const [id] of SELECTS) settings[id.replace('s-', '')] = el(id).value;
+      for (const [id] of CHECKS) settings[id.replace('s-', '')] = el(id).checked;
+      navigator.clipboard.writeText(JSON.stringify(settings, null, 2))
+        .then(() => { el('s-copy').textContent = 'Copied!'; setTimeout(() => { el('s-copy').textContent = 'Copy settings'; }, 1200); })
+        .catch(() => { el('s-copy').textContent = 'Failed'; setTimeout(() => { el('s-copy').textContent = 'Copy settings'; }, 1200); });
+    });
+
+    el('s-reset').addEventListener('click', () => {
+      for (const [id, def] of SLIDERS) {
+        el(id).value = def;
+        el(id + '-val').textContent = def;
+        localStorage.removeItem(LS_PREFIX + id);
+      }
+      for (const [id, def] of SELECTS) {
+        el(id).value = def;
+        localStorage.removeItem(LS_PREFIX + id);
+      }
+      for (const [id, def] of CHECKS) {
+        el(id).checked = def;
+        localStorage.removeItem(LS_PREFIX + id);
+      }
+      schedulePipeline();
+    });
+
+    function getPipelineOpts() {
+      return {
+        hintN:          parseInt(el('s-hintN').value) || 0,
+        circleParam2:   parseFloat(el('s-circleParam2').value),
+        houghBlurSize:  parseInt(el('s-houghBlurSize').value),
+        cannyLo:        parseFloat(el('s-cannyLo').value),
+        cannyHi:        parseFloat(el('s-cannyHi').value),
+        rpThreshRatio:  parseFloat(el('s-rpThreshRatio').value),
+        gradFloor:      parseFloat(el('s-gradFloor').value),
+        ransacThr:      parseFloat(el('s-ransacThr').value),
+        claheEnabled:   el('s-claheEnabled').checked,
+        reDetect:       el('s-reDetect').checked,
+        combinedGrid:   el('s-combinedGrid').checked,
+        skipTrimEdges:  el('s-skipTrimEdges').checked,
+      };
     }
 
     // ── Load image into input canvas ───────────────────────────────────────────
@@ -322,11 +496,14 @@
     el('process-btn').addEventListener('click',  () => runPipeline(false));
     el('use-full-btn').addEventListener('click', () => runPipeline(true));
 
+    // Also re-run when settings panel is opened (in case image was loaded while collapsed)
+    el('settings-panel').addEventListener('toggle', () => { if (el('settings-panel').open) schedulePipeline(); });
+
     let pipeTimer = null;
     function schedulePipeline() {
       if (!imageLoaded) return;
       clearTimeout(pipeTimer);
-      pipeTimer = setTimeout(() => runPipeline(false), 350);
+      pipeTimer = setTimeout(() => runPipeline(), 350);
     }
 
     async function runPipeline(fullImage) {
@@ -383,9 +560,16 @@
           }
         };
 
+        const pipelineOpts = getPipelineOpts();
+        if (fullImage) {
+          pipelineOpts.rectCorners = [
+            { x: 0, y: 0 }, { x: src.cols - 1, y: 0 },
+            { x: src.cols - 1, y: src.rows - 1 }, { x: 0, y: src.rows - 1 },
+          ];
+        }
         const result = sharedRunPipeline(
           { colorMat: src, grayMat, width: src.cols, height: src.rows },
-          { onStage, onIntermediate });
+          { ...pipelineOpts, onStage, onIntermediate });
 
         if (!result) {
           setStatus('Grid detection failed.');
