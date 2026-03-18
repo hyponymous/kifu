@@ -4,7 +4,7 @@
 
 **kifu** is a static site for displaying and sharing Go game records (SGF files) via URL fragments. SGF data is compressed and base64url-encoded into the fragment — no server, no database, no user data stored anywhere. The page decodes the fragment client-side and renders the board.
 
-An optional photo pipeline extracts board positions from images of Go diagrams (books, screenshots, apps) using OpenCV.js.
+An optional photo pipeline extracts board positions from images using OpenCV.js. There are two distinct input categories — **diagrams** (book pages, screenshots, app renders) and **real-world board photos** — which share core grid-detection machinery but differ in preprocessing, tuning, and classification strategy.
 
 ## Directory structure
 
@@ -81,6 +81,15 @@ User uploads/pastes image
 
 OpenCV.js loaded from CDN (~8 MB), only when needed.
 
+### Diagrams vs real-world photos
+
+The pipeline handles two categories of input:
+
+- **Diagrams**: book pages, app screenshots, digital renders. High contrast, clean lines, flat printed circles for stones. The current pipeline is well-tuned for these.
+- **Real-world board photos**: photos of physical boards with wooden texture, 3D stones (specular highlights, shadows), and variable lighting. Requires different preprocessing and tuning.
+
+Both share the same core path — board detection → rectification → grid detection → classification — but diverge in parameters and (eventually) classification strategy. `pipeline-defaults.ts` defines all tunables with ablation variants for both cases.
+
 ### Step 1 — board detection
 
 - Canny edge detection → dilate → `findContours`
@@ -150,6 +159,28 @@ Handles barrel distortion (phone lens) and page curl (book spine) by treating de
 Per-intersection combination: group line-y measurements by row, line-x by column; fit a 1-D linear curve per row and column; combine at each intersection for 2D control points. Circles override both axes. Pilot TPS provides fallback for sparse rows/columns and the border ring.
 
 Coarse-then-fine: first pass gives rough intersections; one dewarp + re-detect iteration is usually sufficient.
+
+## Real-world board photos
+
+### Assumptions (current scope)
+
+- There is a valid board in the image
+- Overhead photo with roughly axis-aligned board
+- 19×19 grid
+
+### Approach
+
+1. **Board isolation** — identify the board as quickly as possible and discard everything else. The board boundary is the highest-value signal; all downstream steps operate on the cropped/rectified board region only.
+2. **Grid detection** — same `detectGrid` machinery as diagrams, but with different tuning (e.g. larger Gaussian blur to suppress wood grain, lower HoughCircles `param2` for 3D stones with specular highlights).
+3. **Illumination normalization** — fit a low-order illumination model (bilinear or biquadratic surface) to empty-intersection brightness, then normalize each patch before classification. The grid provides a dense, evenly-spaced sampling of the board surface for this fit. Without this, lighting gradients across the board cause the checker shadow illusion — a white stone in shadow can appear darker than a black stone in direct light.
+4. **Stone classification** — k-means brightness classifier works for well-lit overhead shots; ONNX CNN classifier planned for varied lighting (dim, warm, mixed).
+
+### Key differences from diagrams
+
+- **Wood grain noise**: real boards have visible grain → spurious Canny edges and Hough lines. Needs larger Gaussian blur before edge detection.
+- **3D stones**: specular highlights and shadows differ from flat printed circles. HoughCircles may lock onto the inner highlight at ~half the true radius; `circleSweep` needs a lower accumulator threshold (`circleParam2`) and the step hint sanity check to catch half-radius detections.
+- **Board vs background**: contour detection struggles when board and surface (e.g. wood floor) share similar color/tone.
+- **Lighting variation**: white stones appear gray or translucent under warm/dim light, breaking global brightness classification.
 
 ## Eval and testing infrastructure
 
