@@ -4,7 +4,7 @@
 import * as defaultFns from './photo-pipeline';
 import { activeDefaults } from './pipeline-defaults';
 import type { ClassifierMode } from './pipeline-defaults';
-import type { Point, Detection, TPSModel, TPSPoint, ClassResult, ElidedEdges, CombinedGrid } from './photo-pipeline';
+import type { Point, Detection, TPSModel, TPSPoint, ClassResult, ElidedEdges, CombinedGrid, InputType } from './photo-pipeline';
 
 const { performance } = globalThis;
 const DEFAULTS = activeDefaults();
@@ -49,6 +49,7 @@ export interface PipelineOpts {
 }
 
 export interface PipelineResult {
+  inputType: InputType;
   nRows: number;
   nCols: number;
   grid: string[][];
@@ -123,6 +124,10 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
   };
 
   try {
+    // ── Input classification ──────────────────────────────────────────────
+    const inputType = timed('classifyInput', () => fns.classifyInputType(grayMat));
+    if (onIntermediate) onIntermediate('classifyInput', { inputType });
+
     // ── Board detection ───────────────────────────────────────────────────
     const { rectCorners, edges } = timed('boardDetection', () => {
       if (lockedRectCorners) {
@@ -195,7 +200,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
         if (s.r < nRows && s.c < nCols) grid[s.r][s.c] = s.color;
       }
 
-      return { nRows, nCols, grid, detectedIntersections: forcedGrid, rectCorners, rectW, rectH, classResult, finalDetection: forcedDetection, elidedEdges };
+      return { inputType, nRows, nCols, grid, detectedIntersections: forcedGrid, rectCorners, rectW, rectH, classResult, finalDetection: forcedDetection, elidedEdges };
     }
 
     // ── Find tight board bounds ────────────────────────────────────────────
@@ -364,7 +369,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
       return result;
     });
 
-    return { nRows, nCols, grid, detectedIntersections, rectCorners, rectW, rectH, classResult, finalDetection, elidedEdges };
+    return { inputType, nRows, nCols, grid, detectedIntersections, rectCorners, rectW, rectH, classResult, finalDetection, elidedEdges };
   } finally {
     toDelete.forEach(m => { try { m.delete(); } catch {} });
   }

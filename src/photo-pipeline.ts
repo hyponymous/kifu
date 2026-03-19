@@ -90,6 +90,51 @@ export type ReadonlyMatrix<T> = readonly (readonly T[])[];
 // GridBounds is a CvRect — returned by findGridBounds / cv.boundingRect
 type GridBounds = CvRect;
 
+// ── Input classification ─────────────────────────────────────────────────────
+
+export type InputType = 'diagram' | 'photo';
+
+const EDGE_DENSITY_THRESHOLD = 0.235;
+
+/**
+ * Classify whether the input image is a diagram (book page, app screenshot,
+ * digital render) or a real-world board photo.
+ *
+ * Uses Canny edge density on a small downsampled version of the image.
+ * Real board photos have dense edges from wood grain texture; diagrams —
+ * even colored app screenshots with rendered wood — have smooth fills
+ * between grid lines.
+ *
+ * Tested on 35 images: all diagrams ≤ 0.20, all photos ≥ 0.27.
+ * Threshold set at 0.235 (midpoint of the gap).
+ *
+ * Possible future improvements if the gap narrows:
+ * - Combine with median saturation (good for grayscale diagrams)
+ * - Local variance in small patches (grain vs flat fill)
+ * - Bayesian combination of multiple signals
+ */
+function classifyInputType(grayMat: CvMat): InputType {
+  const targetSize = 200;
+  const scale = targetSize / Math.max(grayMat.cols, grayMat.rows);
+  const small = new cv.Mat();
+  cv.resize(grayMat, small, new cv.Size(0, 0), scale, scale);
+
+  const edges = new cv.Mat();
+  cv.Canny(small, edges, 50, 125);
+
+  const data = edges.data;
+  let edgePixels = 0;
+  for (let i = 0; i < data.length; i++) {
+    if (data[i] > 0) edgePixels++;
+  }
+  const density = edgePixels / (small.cols * small.rows);
+
+  edges.delete();
+  small.delete();
+
+  return density >= EDGE_DENSITY_THRESHOLD ? 'photo' : 'diagram';
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function median(arr: readonly number[]) {
@@ -2765,4 +2810,8 @@ export {
 
   // edge detection
   detectElidedEdges,
+
+  // input classification
+  classifyInputType,
+  EDGE_DENSITY_THRESHOLD,
 };
