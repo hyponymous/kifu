@@ -1317,7 +1317,7 @@ function kmeans2(values: number[], seedLo: number, seedHi: number) {
 // Returns { stones, grayCache, dbgInfo }
 // useHoughW: whether to promote empty intersections with nearby circle detection to W
 
-function classifyStones(grayMat: CvMat, rowPos: readonly number[], colPos: readonly number[], step: number, rawCircles: Circle[], intersections: ReadonlyMatrix<Point>, useHoughW: boolean = false, { rpThreshRatio = 0.85, gradFloor = 64 }: { rpThreshRatio?: number; gradFloor?: number } = {}) {
+function classifyStones(grayMat: CvMat, rowPos: readonly number[], colPos: readonly number[], step: number, rawCircles: Circle[], intersections: ReadonlyMatrix<Point>, useHoughW: boolean = false, { rpThreshRatio = 0.85, gradFloor = 64, inputType = 'diagram' as InputType }: { rpThreshRatio?: number; gradFloor?: number; inputType?: InputType } = {}) {
   const W    = grayMat.cols, H = grayMat.rows;
   const gray = grayMat.data;
   const grayCache = { data: new Uint8Array(gray), W, H };
@@ -1336,7 +1336,9 @@ function classifyStones(grayMat: CvMat, rowPos: readonly number[], colPos: reado
 
 
   const sinMask    = stoneR / step;
-  const bodyAnnIn  = stoneR * 0.35;
+  // Diagrams have numbers/symbols at stone centers — use annulus to avoid them.
+  // Real photos have clean stones — use the full disc for a stronger signal.
+  const bodyAnnIn  = inputType === 'photo' ? 0 : stoneR * 0.35;
   const bodyAnnOut = stoneR * 0.85;
   const snapTol2 = (step * 0.35) ** 2;
   const snapRlo  = stoneR * 0.75, snapRhi = stoneR * 1.25;

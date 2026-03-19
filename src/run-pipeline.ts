@@ -186,7 +186,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
         fns.classifyStones(rectGray, forcedDetection.rowPos, forcedDetection.colPos,
           forcedDetection.step, forcedDetection.rawCircles,
           forcedDetection.intersections, true,
-          { rpThreshRatio, gradFloor })
+          { rpThreshRatio, gradFloor, inputType })
       );
       if (onIntermediate) onIntermediate('classification', { classResult, finalDetection: forcedDetection });
 
@@ -328,7 +328,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
       return fns.classifyStones(dewarpedGray, finalDetection.rowPos, finalDetection.colPos,
         finalDetection.step, finalDetection.rawCircles,
         finalDetection.intersections, true,
-        { rpThreshRatio, gradFloor });
+        { rpThreshRatio, gradFloor, inputType });
     });
 
     if (onIntermediate) onIntermediate('classification', { classResult, finalDetection });
