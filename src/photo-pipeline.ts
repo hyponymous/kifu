@@ -1309,9 +1309,24 @@ function classifyStones(grayMat: CvMat, rowPos: readonly number[], colPos: reado
         const d2 = (circ.x - cx) ** 2 + (circ.y - cy) ** 2;
         if (d2 < bestD2) { bestD2 = d2; cx = Math.round(circ.x); cy = Math.round(circ.y); }
       }
-      rpArr.push(radialPower(gx, gy, W, H, cx, cy, ringIn, ringOut, gradFloor, sinMask));
-      bdArr.push(sampleAnnulus(gray, W, H, cx, cy, bodyAnnIn, bodyAnnOut));
-      pts.push({ r, c, cx, cy });
+      // 2D sweep: try nearby centers to handle off-center stone placement
+      // (real boards — stones aren't snapped to exact grid intersections).
+      // Sweep radius and step are proportional to the grid step size so the
+      // search scales with image resolution / board size.
+      const sweepR    = Math.max(1, Math.round(step * 0.1));
+      const sweepStep = Math.max(1, Math.round(step * 0.04));
+      let bestRP = radialPower(gx, gy, W, H, cx, cy, ringIn, ringOut, gradFloor, sinMask);
+      let bestCx = cx, bestCy = cy;
+      for (let sdy = -sweepR; sdy <= sweepR; sdy += sweepStep) {
+        for (let sdx = -sweepR; sdx <= sweepR; sdx += sweepStep) {
+          if (sdx === 0 && sdy === 0) continue;
+          const rp = radialPower(gx, gy, W, H, cx + sdx, cy + sdy, ringIn, ringOut, gradFloor, sinMask);
+          if (rp > bestRP) { bestRP = rp; bestCx = cx + sdx; bestCy = cy + sdy; }
+        }
+      }
+      rpArr.push(bestRP);
+      bdArr.push(sampleAnnulus(gray, W, H, bestCx, bestCy, bodyAnnIn, bodyAnnOut));
+      pts.push({ r, c, cx: bestCx, cy: bestCy });
     }
   }
   sobelX.delete(); sobelY.delete();
