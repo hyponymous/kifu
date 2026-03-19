@@ -128,6 +128,10 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
     const inputType = timed('classifyInput', () => fns.classifyInputType(grayMat));
     if (onIntermediate) onIntermediate('classifyInput', { inputType });
 
+    // Photos need higher canny thresholds to suppress wood grain noise
+    const effectiveCannyLo = inputType === 'photo' ? Math.max(cannyLo, 100) : cannyLo;
+    const effectiveCannyHi = inputType === 'photo' ? Math.max(cannyHi, 250) : cannyHi;
+
     // ── Board detection ───────────────────────────────────────────────────
     const { rectCorners, edges } = timed('boardDetection', () => {
       if (lockedRectCorners) {
@@ -136,7 +140,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
       const blur = mat(new cv.Mat());
       const edges = mat(new cv.Mat());
       cv.GaussianBlur(grayMat, blur, new cv.Size(5, 5), 0);
-      cv.Canny(blur, edges, cannyLo, cannyHi);
+      cv.Canny(blur, edges, effectiveCannyLo, effectiveCannyHi);
       const boardResult = fns.findBoardCornersCore(colorMat, edges, hintN, fns.refineQuadWithHough);
       const rectCorners: Point[] = boardResult ? boardResult.corners : [
         { x: 0, y: 0 }, { x: width - 1, y: 0 },
@@ -190,7 +194,9 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
       );
       if (onIntermediate) onIntermediate('classification', { classResult, finalDetection: forcedDetection });
 
-      const elidedEdges = timed('elidedEdges', () =>
+      // Photos assume a complete board — skip edge elision
+      const noElide: ElidedEdges = { top: false, bottom: false, left: false, right: false };
+      const elidedEdges = inputType === 'photo' ? noElide : timed('elidedEdges', () =>
         fns.detectElidedEdges(rectGray, forcedDetection, classResult.stones)
       );
       if (onIntermediate) onIntermediate('elidedEdges', { elidedEdges });
@@ -205,7 +211,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
 
     // ── Find tight board bounds ────────────────────────────────────────────
     const gridBounds = timed('findGridBounds', () => {
-      const bounds = fns.findGridBounds(rectGray, cannyLo, cannyHi);
+      const bounds = fns.findGridBounds(rectGray, effectiveCannyLo, effectiveCannyHi);
       if (onIntermediate) onIntermediate('findGridBounds', { bounds });
       return bounds;
     });
@@ -245,7 +251,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
       const uniOutH = Math.round(2 * uniPad + (nR - 1) * uniStep);
 
       const { yXs, yYs, xXs, xYs, tpsYPoints, tpsXPoints } = fns.collectOffsetSamples(
-        rectGray, snappedRows, snappedCols, cannyLo, cannyHi,
+        rectGray, snappedRows, snappedCols, effectiveCannyLo, effectiveCannyHi,
         detection.rawCircles, snappedIntersections,
         { rowY: uniRowY, colX: uniColX });
       const { yCoeffs, xCoeffs } = fns.fitSeparableQuadratic(yXs, yYs, xXs, xYs);
@@ -334,7 +340,9 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
     if (onIntermediate) onIntermediate('classification', { classResult, finalDetection });
 
     // ── Elided edge detection ──────────────────────────────────────────────
-    const elidedEdges = timed('elidedEdges', () =>
+    // Photos assume a complete board — skip edge elision
+    const noElide: ElidedEdges = { top: false, bottom: false, left: false, right: false };
+    const elidedEdges = inputType === 'photo' ? noElide : timed('elidedEdges', () =>
       fns.detectElidedEdges(dewarpedGray, finalDetection, classResult.stones)
     );
     if (onIntermediate) onIntermediate('elidedEdges', { elidedEdges });
