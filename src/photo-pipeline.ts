@@ -761,8 +761,10 @@ function detectGrid(grayMat: CvMat, hintN: number, circleSens: number = 21, { fo
   // 1. Harris corners
   const harrisMinDist = Math.max(5, W / 60);
   const cornersMat = new cv.Mat();
+  const harrisMask = new cv.Mat();
   cv.goodFeaturesToTrack(grayMat, cornersMat, 500, 0.01, harrisMinDist,
-                         new cv.Mat(), 3, true, 0.04);
+                         harrisMask, 3, true, 0.04);
+  harrisMask.delete();
   const harrisCorners = [];
   for (let i = 0; i < cornersMat.rows; i++) {
     harrisCorners.push({ x: cornersMat.floatAt(i, 0), y: cornersMat.floatAt(i, 1) });
@@ -1732,8 +1734,10 @@ function collectOffsetSamples(grayMat: CvMat, rowPos: readonly number[], colPos:
     : [];
 
   const corners = new cv.Mat();
+  const offsetMask = new cv.Mat();
   cv.goodFeaturesToTrack(grayMat, corners, 500, 0.01, Math.min(stepX, stepY) * 0.3,
-                         new cv.Mat(), 3, true, 0.04);
+                         offsetMask, 3, true, 0.04);
+  offsetMask.delete();
   const harrisCorners: Point[] = [];
   for (let i = 0; i < corners.rows; i++) {
     const cx = corners.floatAt(i, 0), cy = corners.floatAt(i, 1);

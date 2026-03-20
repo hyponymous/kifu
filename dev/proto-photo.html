@@ -504,6 +504,8 @@
     el('settings-panel').addEventListener('toggle', () => { if (el('settings-panel').open) schedulePipeline(); });
 
     let pipeTimer = null;
+    let pipelineRunning = false;
+    let pipelinePending = null;   // queued args if a run is requested while busy
     function schedulePipeline() {
       if (!imageLoaded) return;
       clearTimeout(pipeTimer);
@@ -512,6 +514,12 @@
 
     async function runPipeline(fullImage) {
       if (!imageLoaded) return;
+      if (pipelineRunning) {
+        // Queue re-run after the current one finishes (prevents concurrent pipelines)
+        pipelinePending = { fullImage };
+        return;
+      }
+      pipelineRunning = true;
 
 
       const toDelete = [];
@@ -698,6 +706,12 @@
       } finally {
         toDelete.forEach(m => { try { m.delete(); } catch {} });
         drawTiming(stages);
+        pipelineRunning = false;
+        if (pipelinePending) {
+          const pending = pipelinePending;
+          pipelinePending = null;
+          runPipeline(pending.fullImage);
+        }
       }
     }
 
