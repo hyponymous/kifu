@@ -52,6 +52,7 @@ export interface Detection {
   houghLines?: HoughLine[];
   houghRowCentroids?: Cluster[];
   houghColCentroids?: Cluster[];
+  _houghEdges?: CvMat;  // debug: masked Canny edges fed to HoughLines
 }
 
 export interface ClassResult {
@@ -752,7 +753,7 @@ function findGridBounds(grayMat: CvMat, cannyLo: number = 50, cannyHi: number = 
 
 // ── detectGrid ──────────────────────────────────────────────────────────────
 
-function detectGrid(grayMat: CvMat, hintN: number, circleSens: number = 21, { forceRows, forceCols, gridBounds, skipTrimEdges, houghBlurSize }: { forceRows?: number; forceCols?: number; gridBounds?: GridBounds | null; skipTrimEdges?: boolean; houghBlurSize?: number } = {}): Detection | null {
+function detectGrid(grayMat: CvMat, hintN: number, circleSens: number = 21, { forceRows, forceCols, gridBounds, skipTrimEdges, houghBlurSize, useCirclesForAngle }: { forceRows?: number; forceCols?: number; gridBounds?: GridBounds | null; skipTrimEdges?: boolean; houghBlurSize?: number; useCirclesForAngle?: boolean } = {}): Detection | null {
   const W      = grayMat.cols, H = grayMat.rows;
   const refN   = hintN > 0 ? hintN : 19;
   const estStep = W / (refN + 1);
@@ -869,6 +870,9 @@ function detectGrid(grayMat: CvMat, hintN: number, circleSens: number = 21, { fo
     mask.delete(); inv.delete();
   }
 
+  // Stash masked edges for debug visualization before Hough consumes them
+  const houghEdgesClone = edgesMat.clone();
+
   const linesMat = new cv.Mat();
   const houghThr = Math.round(Math.min(W, H) * 0.15);
   cv.HoughLines(edgesMat, linesMat, 1, Math.PI / 180, houghThr);
@@ -932,11 +936,16 @@ function detectGrid(grayMat: CvMat, hintN: number, circleSens: number = 21, { fo
   let colRotXs, colRotYs;   // harris points rotated by colAngle
   if (houghRowAngleDeg != null) {
     const sweepStep = cornerStep || roughStep;
-    const rowResult = sweepAxis(houghRowAngleDeg, 2, sweepStep, harrisCorners, W / 2, H / 2, 'row');
-    const colResult = sweepAxis(houghColAngleDeg!, 2, sweepStep, harrisCorners, W / 2, H / 2, 'col'); // safe: houghColAngleDeg is non-null under the same condition as houghRowAngleDeg (both derive from hMed/vMed)
+    // For photos, use circle centers instead of Harris corners — Harris picks up
+    // wood-grain features that bias the alignment score (monotonic drift, no minimum).
+    const sweepPts = useCirclesForAngle && rawCircles.length >= 10
+      ? rawCircles.map(c => ({ x: c.x, y: c.y }))
+      : harrisCorners;
+    const rowResult = sweepAxis(houghRowAngleDeg, 2, sweepStep, sweepPts, W / 2, H / 2, 'row');
+    const colResult = sweepAxis(houghColAngleDeg!, 2, sweepStep, sweepPts, W / 2, H / 2, 'col'); // safe: houghColAngleDeg is non-null under the same condition as houghRowAngleDeg (both derive from hMed/vMed)
     rowAngle = rowResult.angle; rowRotXs = rowResult.xs; rowRotYs = rowResult.ys;
     colAngle = colResult.angle; colRotXs = colResult.xs; colRotYs = colResult.ys;
-    console.log(`[findGridAngle] hough-seeded rowAngle=${rowAngle.toFixed(2)}° score=${rowResult.score.toFixed(4)} colAngle=${colAngle.toFixed(2)}° score=${colResult.score.toFixed(4)} sweepStep=${sweepStep.toFixed(1)}`);
+    console.log(`[findGridAngle] hough-seeded rowAngle=${rowAngle.toFixed(2)}° score=${rowResult.score.toFixed(4)} colAngle=${colAngle.toFixed(2)}° score=${colResult.score.toFixed(4)} sweepStep=${sweepStep.toFixed(1)} pts=${sweepPts.length}`);
   } else {
     // No hough lines — wide sweep, score each axis independently
     const sweepStep = roughStep;
@@ -1051,9 +1060,9 @@ function detectGrid(grayMat: CvMat, hintN: number, circleSens: number = 21, { fo
   const clusterTol = Math.max(8, Math.round(stepHint * 0.2));
 
   const rowResult = fitGrid(hVotes, forceRows || hintN, stepHint, 'rows', clusterTol);
-  if (!rowResult) return null;
+  if (!rowResult) { houghEdgesClone.delete(); return null; }
   const colResult = fitGrid(vVotes, forceCols || hintN, stepHint, 'cols', clusterTol);
-  if (!colResult) return null;
+  if (!colResult) { houghEdgesClone.delete(); return null; }
 
   // Refine grid model using filtered Harris corners (separate rotations per axis)
   const filteredRowRotY = [], filteredColRotX = [];
@@ -1196,6 +1205,7 @@ function detectGrid(grayMat: CvMat, hintN: number, circleSens: number = 21, { fo
     houghRowCentroids: houghRowClusters, houghColCentroids: houghColClusters,
     lineHPos: [], lineVPos: [],
     intersections,
+    _houghEdges: houghEdgesClone,
   };
 }
 

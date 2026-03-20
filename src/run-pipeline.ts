@@ -218,7 +218,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
 
     // ── Grid detection ────────────────────────────────────────────────────
     const detection = timed('detectGrid', () => {
-      return fns.detectGrid(rectGray, hintN, circleParam2, { forceRows, forceCols, gridBounds, skipTrimEdges, houghBlurSize });
+      return fns.detectGrid(rectGray, hintN, circleParam2, { forceRows, forceCols, gridBounds, skipTrimEdges, houghBlurSize, useCirclesForAngle: inputType === 'photo' });
     });
     if (!detection) return null;
     if (onIntermediate) onIntermediate('detectGrid', { detection });
@@ -301,7 +301,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
       const dewarpedGray = mat(fns.enhanceGray(dewarpedGrayRaw, false, { claheEnabled }));
 
       if (reDetect && finalDetection === detection) {
-        const detection2 = fns.detectGrid(dewarpedGray, hintN, circleParam2, { forceRows, forceCols, skipTrimEdges, houghBlurSize });
+        const detection2 = fns.detectGrid(dewarpedGray, hintN, circleParam2, { forceRows, forceCols, skipTrimEdges, houghBlurSize, useCirclesForAngle: inputType === 'photo' });
         if (detection2
           && detection2.rowPos.length === nRows
           && detection2.colPos.length === nCols) {

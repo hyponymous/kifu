@@ -143,6 +143,10 @@
       <canvas id="canvas-rectified"></canvas>
     </div>
     <div class="stage">
+      <div class="stage-label">hough edges</div>
+      <canvas id="canvas-hough-edges"></canvas>
+    </div>
+    <div class="stage">
       <div class="stage-label">detect1: features</div>
       <canvas id="canvas-d1-features"></canvas>
     </div>
@@ -541,6 +545,11 @@
             drawGridBounds(data.bounds);
           }
           if (name === 'detectGrid') {
+            if (data.detection._houghEdges) {
+              cv.imshow(el('canvas-hough-edges'), data.detection._houghEdges);
+              updateLabel('canvas-hough-edges');
+              data.detection._houghEdges.delete();
+            }
             drawDetect1Features(data.detection);
             drawDetect1Grid(data.detection);
             drawCircleChart(data.detection);
