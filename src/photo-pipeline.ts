@@ -1233,7 +1233,10 @@ function enhanceGray(grayMat: CvMat, usePercentileNorm: boolean = true, opts: { 
 
 // ── Classification helpers ──────────────────────────────────────────────────
 
-function radialPower(gx: Float32Array, gy: Float32Array, W: number, H: number, cx: number, cy: number, rIn: number, rOut: number, gradFloor: number, sinMask: number = 0) {
+/** Grid extent for masking board-edge gradients in radialPower. */
+interface GridExtent { left: number; right: number; top: number; bottom: number }
+
+function radialPower(gx: Float32Array, gy: Float32Array, W: number, H: number, cx: number, cy: number, rIn: number, rOut: number, gradFloor: number, sinMask: number = 0, gridExtent: GridExtent | null = null) {
   const ir   = Math.ceil(rOut);
   const in2  = rIn * rIn, out2 = rOut * rOut;
   const sm2  = sinMask * sinMask;
@@ -1248,6 +1251,8 @@ function radialPower(gx: Float32Array, gy: Float32Array, W: number, H: number, c
       }
       const px = cx + dx, py = cy + dy;
       if (px < 0 || px >= W || py < 0 || py >= H) continue;
+      // Suppress board-edge gradients: skip ring pixels outside the grid extent
+      if (gridExtent && (px < gridExtent.left || px > gridExtent.right || py < gridExtent.top || py > gridExtent.bottom)) continue;
       const idx  = py * W + px;
       const gxv  = gx[idx], gyv = gy[idx];
       const mag2 = gxv * gxv + gyv * gyv;
@@ -1336,6 +1341,16 @@ function classifyStones(grayMat: CvMat, rowPos: readonly number[], colPos: reado
 
 
   const sinMask    = stoneR / step;
+  // Suppress board-edge gradients for photos: skip ring pixels outside grid extent.
+  // The board edge creates a strong gradient that looks radial from corner intersections.
+  // Pad by half ringOut: the board edge is roughly a stone radius beyond the
+  // outermost grid line, so full ringOut would include it. Half ringOut keeps
+  // most of an edge stone's ring while still clipping the board-edge gradient.
+  const extentPad = ringOut * 0.5;
+  const rpGridExtent: GridExtent | null = inputType === 'photo'
+    ? { left: Math.round(colPos[0] - extentPad), right: Math.round(colPos[colPos.length - 1] + extentPad),
+        top: Math.round(rowPos[0] - extentPad), bottom: Math.round(rowPos[rowPos.length - 1] + extentPad) }
+    : null;
   // Diagrams have numbers/symbols at stone centers — use annulus to avoid them.
   // Real photos have clean stones — use the full disc for a stronger signal.
   const bodyAnnIn  = inputType === 'photo' ? 0 : stoneR * 0.35;
@@ -1362,12 +1377,12 @@ function classifyStones(grayMat: CvMat, rowPos: readonly number[], colPos: reado
       // search scales with image resolution / board size.
       const sweepR    = Math.max(1, Math.round(step * 0.1));
       const sweepStep = Math.max(1, Math.round(step * 0.04));
-      let bestRP = radialPower(gx, gy, W, H, cx, cy, ringIn, ringOut, gradFloor, sinMask);
+      let bestRP = radialPower(gx, gy, W, H, cx, cy, ringIn, ringOut, gradFloor, sinMask, rpGridExtent);
       let bestCx = cx, bestCy = cy;
       for (let sdy = -sweepR; sdy <= sweepR; sdy += sweepStep) {
         for (let sdx = -sweepR; sdx <= sweepR; sdx += sweepStep) {
           if (sdx === 0 && sdy === 0) continue;
-          const rp = radialPower(gx, gy, W, H, cx + sdx, cy + sdy, ringIn, ringOut, gradFloor, sinMask);
+          const rp = radialPower(gx, gy, W, H, cx + sdx, cy + sdy, ringIn, ringOut, gradFloor, sinMask, rpGridExtent);
           if (rp > bestRP) { bestRP = rp; bestCx = cx + sdx; bestCy = cy + sdy; }
         }
       }
@@ -1405,6 +1420,7 @@ function classifyStones(grayMat: CvMat, rowPos: readonly number[], colPos: reado
 
   const dbgInfo = { stoneRPCent, emptyRPCent, rpThresh,
                     bCent, wCent, stoneR, bodyAnnIn, bodyAnnOut, ringIn, ringOut, step };
+
 
   const circleNearby = new Set();
   if (useHoughW) {

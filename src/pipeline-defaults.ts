@@ -39,7 +39,7 @@ export const defaults: PipelineDefaults = {
   reDetect:       { active: true,     variants: { 'no-re-detection': false } },
   combinedGrid:   { active: true,     variants: { 'no-combined-grid': false } },
   skipTrimEdges:  { active: true,     variants: { 'trim-edges': false } },
-  rpThreshRatio:  { active: 0.85,     variants: { 'rp-thresh-0.70': 0.70, 'rp-thresh-0.95': 0.95 } },
+  rpThreshRatio:  { active: 0.75,     variants: { 'rp-thresh-0.60': 0.60, 'rp-thresh-0.85': 0.85 } },
   gradFloor:      { active: 64,       variants: { 'grad-floor-32': 32, 'grad-floor-128': 128 } },
   // CLAHE is off by default to preserve existing diagram fixture behavior.
   // Enable via ablation ('clahe' variant) or for real-board photo inputs.
