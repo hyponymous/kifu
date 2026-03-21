@@ -36,6 +36,9 @@
     <label class="file-btn">Open image <input type="file" id="file-input" accept="image/*" hidden></label>
     <button id="run-btn" disabled>Run Pipeline</button>
     <span class="param">
+      <label><input type="checkbox" id="auto-dims" checked> auto dims</label>
+    </span>
+    <span class="param">
       <label>Rows</label>
       <input type="number" id="board-rows" min="2" max="25" placeholder="auto">
     </span>
@@ -43,6 +46,7 @@
       <label>Cols</label>
       <input type="number" id="board-cols" min="2" max="25" placeholder="auto">
     </span>
+    <span id="detected-dims" style="font-size:0.78rem;color:#888"></span>
   </div>
 
   <div class="row">
@@ -162,6 +166,9 @@
         lastRectW = 0; lastRectH = 0;
         el('board-rows').value = '';
         el('board-cols').value = '';
+        el('auto-dims').checked = true;
+        syncAutoDims();
+        el('detected-dims').textContent = '';
         viewport = { scale: 1, panX: 0, panY: 0 };
         setActiveTool('move');
         drawInputCanvas();
@@ -499,6 +506,30 @@
       el('copy-fixture-btn').disabled = false;
     }
 
+    function syncAutoDims() {
+      const auto = el('auto-dims').checked;
+      el('board-rows').disabled = auto;
+      el('board-cols').disabled = auto;
+      el('board-rows').style.opacity = auto ? '0.4' : '1';
+      el('board-cols').style.opacity = auto ? '0.4' : '1';
+      if (auto) {
+        el('board-rows').value = '';
+        el('board-cols').value = '';
+      }
+    }
+    syncAutoDims();
+
+    let dimRerunTimer = null;
+    function scheduleDimRerun() {
+      if (dimRerunTimer) clearTimeout(dimRerunTimer);
+      dimRerunTimer = setTimeout(() => { dimRerunTimer = null; runPipeline(); }, 500);
+    }
+
+    el('auto-dims').addEventListener('change', () => {
+      syncAutoDims();
+      if (imageLoaded) scheduleDimRerun();
+    });
+
     el('board-rows').addEventListener('input', onDimensionChange);
     el('board-cols').addEventListener('input', onDimensionChange);
 
@@ -740,7 +771,7 @@
       const userCols = +el('board-cols').value || 0;
       const forceRows = userRows || 0;
       const forceCols = userCols || 0;
-      const hintN = Math.max(forceRows, forceCols) || 19;
+      const hintN = Math.max(forceRows, forceCols) || 0;
       const scope = new MatScope();
       const mat = m => scope.track(m);
 
@@ -816,8 +847,7 @@
           }
         }
 
-        el('board-rows').value = nRows;
-        el('board-cols').value = nCols;
+        el('detected-dims').textContent = `(detected ${nRows}×${nCols})`;
 
         // Initialize editable stones (non-square aware)
         editableStones = Array.from({ length: nRows }, () => Array(nCols).fill('.'));
@@ -1042,6 +1072,8 @@
       nRows = R; nCols = C;
       el('board-rows').value = R;
       el('board-cols').value = C;
+      el('auto-dims').checked = false;
+      syncAutoDims();
 
       editableStones = Array.from({ length: R }, () => Array(C).fill('.'));
       for (const [r, c, color] of fixture.stones) {

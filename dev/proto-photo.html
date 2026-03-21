@@ -52,13 +52,14 @@
     <div style="margin-top:0.5rem;display:flex;flex-wrap:wrap;gap:0.4rem 1.4rem;align-items:center">
 
       <span class="param">
-        <label for="s-hintN">board hint</label>
-        <select id="s-hintN" style="background:#222;border:1px solid #444;color:#ccc;font:inherit;padding:1px 3px">
-          <option value="0">auto</option>
-          <option value="9">9×9</option>
-          <option value="13">13×13</option>
-          <option value="19">19×19</option>
-        </select>
+        <label>Rows</label>
+        <input type="number" id="s-forceRows" min="2" max="25" placeholder="auto"
+               style="width:4em;background:#222;border:1px solid #444;color:#ccc;font:inherit;padding:1px 3px">
+      </span>
+      <span class="param">
+        <label>Cols</label>
+        <input type="number" id="s-forceCols" min="2" max="25" placeholder="auto"
+               style="width:4em;background:#222;border:1px solid #444;color:#ccc;font:inherit;padding:1px 3px">
       </span>
 
       <span class="param">
@@ -76,6 +77,10 @@
           <option value="7">7</option>
           <option value="9">9</option>
         </select>
+      </span>
+
+      <span class="param">
+        <label><input type="checkbox" id="s-cannyAuto" checked> auto canny</label>
       </span>
 
       <span class="param">
@@ -305,14 +310,19 @@
       ['s-gradFloor',     DEFS.gradFloor],
       ['s-ransacThr',     DEFS.ransacThr],
     ];
+    // Number inputs: [id, defaultValue]  (empty string = auto)
+    const NUMBERS = [
+      ['s-forceRows', ''],
+      ['s-forceCols', ''],
+    ];
     // Select controls: [id, defaultValue]
     const SELECTS = [
-      ['s-hintN',         '0'],
       ['s-houghBlurSize', String(DEFS.houghBlurSize)],
     ];
     // Checkbox controls: [id, defaultValue]
     const CHECKS = [
       ['read-digits',    false],
+      ['s-cannyAuto',    true],
       ['s-claheEnabled', DEFS.claheEnabled],
       ['s-reDetect',     DEFS.reDetect],
       ['s-combinedGrid', DEFS.combinedGrid],
@@ -325,6 +335,10 @@
         el(id).value = saved !== null ? saved : def;
         el(id + '-val').textContent = el(id).value;
       }
+      for (const [id, def] of NUMBERS) {
+        const saved = localStorage.getItem(LS_PREFIX + id);
+        el(id).value = saved !== null ? saved : def;
+      }
       for (const [id, def] of SELECTS) {
         const saved = localStorage.getItem(LS_PREFIX + id);
         el(id).value = saved !== null ? saved : def;
@@ -335,6 +349,16 @@
       }
     }
     loadSettings();
+
+    function syncCannySliders() {
+      const auto = el('s-cannyAuto').checked;
+      el('s-cannyLo').disabled = auto;
+      el('s-cannyHi').disabled = auto;
+      el('s-cannyLo').style.opacity = auto ? '0.4' : '1';
+      el('s-cannyHi').style.opacity = auto ? '0.4' : '1';
+    }
+    syncCannySliders();
+    el('s-cannyAuto').addEventListener('change', syncCannySliders);
 
     function saveAndRerun(e) {
       const id = e.target.id;
@@ -347,14 +371,15 @@
       }
       schedulePipeline();
     }
-    for (const [id] of [...SLIDERS, ...SELECTS, ...CHECKS]) {
+    for (const [id] of [...SLIDERS, ...NUMBERS, ...SELECTS, ...CHECKS]) {
       el(id).addEventListener('change', saveAndRerun);
-      if (el(id).type === 'range') el(id).addEventListener('input', saveAndRerun);
+      if (el(id).type === 'range' || el(id).type === 'number') el(id).addEventListener('input', saveAndRerun);
     }
 
     el('s-copy').addEventListener('click', () => {
       const settings = {};
       for (const [id] of SLIDERS) settings[id.replace('s-', '')] = parseFloat(el(id).value);
+      for (const [id] of NUMBERS) { const v = el(id).value; settings[id.replace('s-', '')] = v ? parseInt(v) : 0; }
       for (const [id] of SELECTS) settings[id.replace('s-', '')] = el(id).value;
       for (const [id] of CHECKS) settings[id.replace('s-', '')] = el(id).checked;
       navigator.clipboard.writeText(JSON.stringify(settings, null, 2))
@@ -366,6 +391,10 @@
       for (const [id, def] of SLIDERS) {
         el(id).value = def;
         el(id + '-val').textContent = def;
+        localStorage.removeItem(LS_PREFIX + id);
+      }
+      for (const [id, def] of NUMBERS) {
+        el(id).value = def;
         localStorage.removeItem(LS_PREFIX + id);
       }
       for (const [id, def] of SELECTS) {
@@ -380,12 +409,15 @@
     });
 
     function getPipelineOpts() {
-      return {
-        hintN:          parseInt(el('s-hintN').value) || 0,
+      const forceRows = parseInt(el('s-forceRows').value) || 0;
+      const forceCols = parseInt(el('s-forceCols').value) || 0;
+      const hintN = Math.max(forceRows, forceCols);
+      const opts = {
+        hintN,
+        forceRows,
+        forceCols,
         circleParam2:   parseFloat(el('s-circleParam2').value),
         houghBlurSize:  parseInt(el('s-houghBlurSize').value),
-        cannyLo:        parseFloat(el('s-cannyLo').value),
-        cannyHi:        parseFloat(el('s-cannyHi').value),
         rpThreshRatio:  parseFloat(el('s-rpThreshRatio').value),
         gradFloor:      parseFloat(el('s-gradFloor').value),
         ransacThr:      parseFloat(el('s-ransacThr').value),
@@ -394,6 +426,11 @@
         combinedGrid:   el('s-combinedGrid').checked,
         skipTrimEdges:  el('s-skipTrimEdges').checked,
       };
+      if (!el('s-cannyAuto').checked) {
+        opts.cannyLo = parseFloat(el('s-cannyLo').value);
+        opts.cannyHi = parseFloat(el('s-cannyHi').value);
+      }
+      return opts;
     }
 
     // ── Load image into input canvas ───────────────────────────────────────────
