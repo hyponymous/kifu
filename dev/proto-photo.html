@@ -237,6 +237,7 @@
     } from '../photo-pipeline';
     import { runPipeline as sharedRunPipeline } from '../run-pipeline';
     import { activeDefaults } from '../pipeline-defaults';
+    import { MatScope } from '../mat-scope';
 
     // ── Helpers ────────────────────────────────────────────────────────────────
     function el(id) { return document.getElementById(id); }
@@ -522,8 +523,8 @@
       pipelineRunning = true;
 
 
-      const toDelete = [];
-      const mat = m => { toDelete.push(m); return m; };
+      const scope = new MatScope();
+      const mat = m => scope.track(m);
 
       // Free previous dewarpedGray clone
       if (lastDewarpedGray) { try { lastDewarpedGray.delete(); } catch {} lastDewarpedGray = null; }
@@ -704,7 +705,7 @@
         setStatus('Error: ' + err.message);
         console.error(err);
       } finally {
-        toDelete.forEach(m => { try { m.delete(); } catch {} });
+        scope.release();
         drawTiming(stages);
         pipelineRunning = false;
         if (pipelinePending) {

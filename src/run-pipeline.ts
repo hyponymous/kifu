@@ -3,6 +3,7 @@
 
 import * as defaultFns from './photo-pipeline';
 import { activeDefaults } from './pipeline-defaults';
+import { MatScope } from './mat-scope';
 import type { ClassifierMode } from './pipeline-defaults';
 import type { Point, Detection, TPSModel, TPSPoint, ClassResult, ElidedEdges, CombinedGrid, InputType } from './photo-pipeline';
 
@@ -113,8 +114,8 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
   const onStage = opts.onStage ?? null;
   const onIntermediate = opts.onIntermediate ?? null;
 
-  const toDelete: CvMat[] = [];
-  const mat = (m: CvMat): CvMat => { toDelete.push(m); return m; };
+  const scope = new MatScope();
+  const mat = (m: CvMat): CvMat => scope.track(m);
 
   const timed = <T>(name: string, fn: () => T): T => {
     const s = performance.now();
@@ -379,6 +380,6 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
 
     return { inputType, nRows, nCols, grid, detectedIntersections, rectCorners, rectW, rectH, classResult, finalDetection, elidedEdges };
   } finally {
-    toDelete.forEach(m => { try { m.delete(); } catch {} });
+    scope.release();
   }
 }

@@ -91,6 +91,7 @@
       buildDetectionFromGrid, fitTPS, evalTPS,
     } from '../photo-pipeline';
     import { runPipeline as sharedRunPipeline } from '../run-pipeline';
+    import { MatScope } from '../mat-scope';
 
     const el = id => document.getElementById(id);
 
@@ -740,8 +741,8 @@
       const forceRows = userRows || 0;
       const forceCols = userCols || 0;
       const hintN = Math.max(forceRows, forceCols) || 19;
-      const toDelete = [];
-      const mat = m => { toDelete.push(m); return m; };
+      const scope = new MatScope();
+      const mat = m => scope.track(m);
 
       try {
         el('status').textContent = forcedGrid ? 'Reclassifying…' : 'Running pipeline…';
@@ -857,7 +858,7 @@
         el('status').textContent = 'Error: ' + err.message;
         console.error(err);
       } finally {
-        toDelete.forEach(m => { try { m.delete(); } catch {} });
+        scope.release();
       }
     }
 
