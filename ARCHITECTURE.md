@@ -218,15 +218,7 @@ Input → ClassifyInput → FindBoard → Rectify → FindGrid → Dewarp → Cl
 
 **Separate feature extraction from model fitting.** Currently `detectGrid` does both — it extracts Harris corners, circles, Hough lines AND fits the grid model. If feature extraction were a separate step, multiple model-fitting strategies could share the same features. The multi-threshold Canny tensor idea fits here naturally as a richer feature extraction layer.
 
-**Mat lifecycle management.** OpenCV Mats are the main source of incidental complexity — manual allocation/deletion, leak risk, can't pass freely between stages. A `MatScope` helper that collects Mats and bulk-deletes them on scope exit would formalize the pattern already used ad-hoc (`toDelete` / `mat()` in `runPipeline`). Each stage function gets its own scope for temporaries; Mats that need to survive are tracked by the caller's scope. Low-risk, incrementally adoptable (convert one function at a time), eliminates "forgot to delete" bugs.
-
-```typescript
-class MatScope {
-  private mats: CvMat[] = [];
-  track<T extends CvMat>(m: T): T { this.mats.push(m); return m; }
-  release() { for (const m of this.mats) { try { m.delete(); } catch {} } this.mats.length = 0; }
-  run<T>(fn: (scope: MatScope) => T): T { try { return fn(this); } finally { this.release(); } }
-}
+**Mat lifecycle management (implemented).** `MatScope` (`src/mat-scope.ts`) tracks CvMat allocations and bulk-deletes them on scope exit. Replaces the ad-hoc `toDelete[]`/`mat()` pattern. Already adopted in `run-pipeline.ts`, `proto-photo.html`, and `fixture-editor.html`. Individual functions in `photo-pipeline.ts` still manage Mats manually — these can be migrated incrementally as they're refactored into stages.
 ```
 
 ## Eval and testing infrastructure
