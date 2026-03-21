@@ -91,6 +91,78 @@ export type ReadonlyMatrix<T> = readonly (readonly T[])[];
 // GridBounds is a CvRect — returned by findGridBounds / cv.boundingRect
 type GridBounds = CvRect;
 
+// ── Multi-threshold Canny ───────────────────────────────────────────────────
+
+export interface CannyStack {
+  /** Per-pixel support count (CV_8U, 0..N) — how many threshold pairs detected an edge */
+  support: CvMat;
+  /** Individual binary edge maps per threshold pair */
+  layers: CvMat[];
+  /** Threshold pairs used */
+  thresholds: readonly [number, number][];
+}
+
+/**
+ * Default threshold pairs for multi-threshold Canny (sensitive → strict).
+ * Soft edges (wood grain, noise) appear only at low thresholds; strong edges
+ * (grid lines, stone outlines) survive across all levels.
+ */
+const DEFAULT_CANNY_THRESHOLDS: readonly [number, number][] = [
+  [30, 60], [40, 90], [50, 125], [70, 175], [100, 250],
+];
+
+/**
+ * Compute Canny edge detection at multiple threshold pairs and stack the
+ * results into a per-pixel support map. Callers can threshold the support
+ * map (e.g. `support >= 3`) to get a consensus edge map that suppresses
+ * noise while retaining strong structural edges.
+ *
+ * The input should already be blurred if the caller needs blur — this
+ * function does not apply any blur itself (caller-decides-blur pattern).
+ */
+function multiThresholdCanny(
+  gray: CvMat,
+  thresholds: readonly [number, number][] = DEFAULT_CANNY_THRESHOLDS,
+): CannyStack {
+  const support = cv.Mat.zeros(gray.rows, gray.cols, cv.CV_8U);
+  const layers: CvMat[] = [];
+  const ones = cv.Mat.ones(gray.rows, gray.cols, cv.CV_8U);
+
+  for (const [lo, hi] of thresholds) {
+    const edges = new cv.Mat();
+    cv.Canny(gray, edges, lo, hi);
+    layers.push(edges);
+    // Increment support where this layer has edges:
+    // support += (edges > 0) ? 1 : 0
+    // edges is 0/255, so threshold to 0/1 first
+    const binary = new cv.Mat();
+    cv.threshold(edges, binary, 127, 1, cv.THRESH_BINARY);
+    cv.add(support, binary, support);
+    binary.delete();
+  }
+
+  ones.delete();
+  return { support, layers, thresholds };
+}
+
+/**
+ * Threshold a CannyStack's support map: pixels with support >= minSupport
+ * become 255, others become 0. Returns a new CV_8U mat (caller must delete).
+ */
+function thresholdCannyStack(stack: CannyStack, minSupport: number): CvMat {
+  const out = new cv.Mat();
+  cv.threshold(stack.support, out, minSupport - 0.5, 255, cv.THRESH_BINARY);
+  return out;
+}
+
+/**
+ * Delete all mats owned by a CannyStack.
+ */
+function deleteCannyStack(stack: CannyStack): void {
+  stack.support.delete();
+  for (const layer of stack.layers) layer.delete();
+}
+
 // ── Input classification ─────────────────────────────────────────────────────
 
 export type InputType = 'diagram' | 'photo';
@@ -793,6 +865,9 @@ export interface GridFeatures {
   // Step hint (derived from radiusStep / estStep / nnStep)
   stepHint: number;
   stepHintSrc: string;
+
+  // Multi-threshold Canny stack (present when multiCannyEnabled)
+  cannyStack?: CannyStack;
 }
 
 function extractGridFeatures(
@@ -800,6 +875,8 @@ function extractGridFeatures(
   gridBounds: GridBounds | null | undefined,
   houghBlurSize: number | undefined,
   useCirclesForAngle: boolean | undefined,
+  multiCannyEnabled?: boolean,
+  minCannySupport?: number,
 ): GridFeatures {
   const W = grayMat.cols, H = grayMat.rows;
   const refN = hintN > 0 ? hintN : 19;
@@ -890,11 +967,19 @@ function extractGridFeatures(
   console.log(`[detectGrid] circleSweep: bestStep=${bestSweepStep.toFixed(1)} circles=${rawCircles.length} medRadius=${medRadius?.toFixed(1) ?? 'null'} radiusStep=${radiusStep?.toFixed(1) ?? 'null'}`);
 
   // ── 3. HoughLines (with circle masking) ────────────────────────────────────
-  const edgesMat = new cv.Mat();
   const blurMat = new cv.Mat();
   const blurKernel = houghBlurSize ?? 3;
   cv.GaussianBlur(grayMat, blurMat, new cv.Size(blurKernel, blurKernel), 0);
-  cv.Canny(blurMat, edgesMat, 50, 125);
+
+  let edgesMat: CvMat;
+  let cannyStack: CannyStack | undefined;
+  if (multiCannyEnabled) {
+    cannyStack = multiThresholdCanny(blurMat, DEFAULT_CANNY_THRESHOLDS);
+    edgesMat = thresholdCannyStack(cannyStack, minCannySupport ?? 3);
+  } else {
+    edgesMat = new cv.Mat();
+    cv.Canny(blurMat, edgesMat, 50, 125);
+  }
   blurMat.delete();
 
   if (gridBounds) {
@@ -1034,6 +1119,7 @@ function extractGridFeatures(
     rowAngle, colAngle,
     rowRotXs, rowRotYs, colRotXs, colRotYs,
     stepHint, stepHintSrc,
+    cannyStack,
   };
 }
 
@@ -1268,9 +1354,12 @@ function fitGridFromFeatures(
   };
 }
 
-function detectGrid(grayMat: CvMat, hintN: number, circleSens: number = 21, { forceRows, forceCols, gridBounds, skipTrimEdges, houghBlurSize, useCirclesForAngle }: { forceRows?: number; forceCols?: number; gridBounds?: GridBounds | null; skipTrimEdges?: boolean; houghBlurSize?: number; useCirclesForAngle?: boolean } = {}): Detection | null {
-  const features = extractGridFeatures(grayMat, hintN, circleSens, gridBounds, houghBlurSize, useCirclesForAngle);
-  return fitGridFromFeatures(features, hintN, { forceRows, forceCols, gridBounds, skipTrimEdges });
+function detectGrid(grayMat: CvMat, hintN: number, circleSens: number = 21, { forceRows, forceCols, gridBounds, skipTrimEdges, houghBlurSize, useCirclesForAngle, multiCannyEnabled, minCannySupport }: { forceRows?: number; forceCols?: number; gridBounds?: GridBounds | null; skipTrimEdges?: boolean; houghBlurSize?: number; useCirclesForAngle?: boolean; multiCannyEnabled?: boolean; minCannySupport?: number } = {}): Detection | null {
+  const features = extractGridFeatures(grayMat, hintN, circleSens, gridBounds, houghBlurSize, useCirclesForAngle, multiCannyEnabled, minCannySupport);
+  const result = fitGridFromFeatures(features, hintN, { forceRows, forceCols, gridBounds, skipTrimEdges });
+  // Clean up cannyStack if present — it's not needed after grid fitting
+  if (features.cannyStack) deleteCannyStack(features.cannyStack);
+  return result;
 }
 
 // ── Preprocessing ───────────────────────────────────────────────────────────
@@ -2906,6 +2995,12 @@ export {
 
   // edge detection
   detectElidedEdges,
+
+  // multi-threshold Canny
+  multiThresholdCanny,
+  thresholdCannyStack,
+  deleteCannyStack,
+  DEFAULT_CANNY_THRESHOLDS,
 
   // input classification
   classifyInputType,

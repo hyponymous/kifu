@@ -29,6 +29,8 @@ export interface PipelineDefaults {
   classifierMode:  TunableVariants<ClassifierMode>;
   houghBlurSize:   TunableVariants<number>;
   circleParam2:    TunableVariants<number>;
+  multiCannyEnabled: TunableVariants<boolean>;
+  minCannySupport:   TunableVariants<number>;
 }
 
 export const defaults: PipelineDefaults = {
@@ -54,6 +56,13 @@ export const defaults: PipelineDefaults = {
   // higher = fewer false positives. Real stones (3D with specular highlights) need
   // a lower threshold than flat diagram circles.
   circleParam2:   { active: 24,       variants: { 'circle-p2-12': 12, 'circle-p2-16': 16 } },
+  // Multi-threshold Canny: compute edges at several (lo, hi) pairs, use
+  // per-pixel support count to separate structural edges from noise.
+  // Off by default to preserve existing diagram fixture behavior.
+  multiCannyEnabled: { active: false,  variants: { 'multi-canny': true } },
+  // Minimum number of threshold layers that must agree for a pixel to be
+  // considered an edge when multiCannyEnabled is true. Range: 1..5.
+  minCannySupport:   { active: 3,      variants: { 'min-support-2': 2, 'min-support-4': 4 } },
 };
 
 export interface ActiveDefaults {
@@ -70,6 +79,8 @@ export interface ActiveDefaults {
   classifierMode: ClassifierMode;
   houghBlurSize: number;
   circleParam2: number;
+  multiCannyEnabled: boolean;
+  minCannySupport: number;
 }
 
 /** Return a plain { key: active } object for use as pipeline opts. */
@@ -88,5 +99,7 @@ export function activeDefaults(): ActiveDefaults {
     classifierMode: defaults.classifierMode.active,
     houghBlurSize:  defaults.houghBlurSize.active,
     circleParam2:   defaults.circleParam2.active,
+    multiCannyEnabled: defaults.multiCannyEnabled.active,
+    minCannySupport:   defaults.minCannySupport.active,
   };
 }

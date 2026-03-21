@@ -47,6 +47,8 @@ export interface PipelineOpts {
   classifierMode?: ClassifierMode;
   houghBlurSize?: number;
   circleParam2?: number;
+  multiCannyEnabled?: boolean;
+  minCannySupport?: number;
   /** When classifierMode is 'onnx', this must be provided (pre-loaded ONNX session wrapper). */
   classifyIntersections?: IntersectionClassifier;
   rectCorners?: Point[];
@@ -90,6 +92,8 @@ interface ResolvedConfig {
   classifierMode: ClassifierMode;
   houghBlurSize: number;
   circleParam2: number;
+  multiCannyEnabled: boolean;
+  minCannySupport: number;
   classifyIntersections: IntersectionClassifier | null;
   lockedRectCorners: Point[] | null;
   forcedGrid: { x: number; y: number; r: number; c: number }[] | null;
@@ -113,6 +117,8 @@ function resolveConfig(opts: PipelineOpts): ResolvedConfig {
     classifierMode: opts.classifierMode ?? DEFAULTS.classifierMode,
     houghBlurSize: opts.houghBlurSize ?? DEFAULTS.houghBlurSize,
     circleParam2: opts.circleParam2 ?? DEFAULTS.circleParam2,
+    multiCannyEnabled: opts.multiCannyEnabled ?? DEFAULTS.multiCannyEnabled,
+    minCannySupport: opts.minCannySupport ?? DEFAULTS.minCannySupport,
     classifyIntersections: opts.classifyIntersections ?? null,
     lockedRectCorners: opts.rectCorners ?? null,
     forcedGrid: opts.forcedGrid ?? null,
@@ -319,7 +325,8 @@ function stageReDetection(
   dewarped: CvMat, tpsFitDetection: Detection, origDetection: Detection,
   nRows: number, nCols: number,
   cfg: Pick<ResolvedConfig, 'reDetect' | 'claheEnabled' | 'hintN' | 'circleParam2' |
-    'forceRows' | 'forceCols' | 'skipTrimEdges' | 'houghBlurSize'>,
+    'forceRows' | 'forceCols' | 'skipTrimEdges' | 'houghBlurSize' |
+    'multiCannyEnabled' | 'minCannySupport'>,
   inputType: InputType,
 ): ReDetectionResult {
   const dewarpedGrayRaw = scope.track(new cv.Mat());
@@ -332,6 +339,7 @@ function stageReDetection(
       forceRows: cfg.forceRows, forceCols: cfg.forceCols,
       skipTrimEdges: cfg.skipTrimEdges, houghBlurSize: cfg.houghBlurSize,
       useCirclesForAngle: inputType === 'photo',
+      multiCannyEnabled: cfg.multiCannyEnabled, minCannySupport: cfg.minCannySupport,
     });
     if (detection2
       && detection2.rowPos.length === nRows
@@ -547,6 +555,7 @@ export function runPipeline({ colorMat, grayMat, width, height }: ImageData, opt
         forceRows: cfg.forceRows, forceCols: cfg.forceCols, gridBounds,
         skipTrimEdges: cfg.skipTrimEdges, houghBlurSize: cfg.houghBlurSize,
         useCirclesForAngle: inputType === 'photo',
+        multiCannyEnabled: cfg.multiCannyEnabled, minCannySupport: cfg.minCannySupport,
       }));
     if (!detection) return null;
     if (onIntermediate) onIntermediate('detectGrid', { detection });
