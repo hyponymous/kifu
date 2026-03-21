@@ -202,6 +202,33 @@ These approaches are not mutually exclusive — several could combine.
 
 **Iterative re-bounding.** Run a first pass with loose or no bounds to get approximate grid geometry, then derive tight bounds from the detected grid's center and step, and re-run. Addresses the bootstrap problem where good bounds require knowing the grid, but finding the grid requires good bounds.
 
+### Pipeline architecture (brainstorm)
+
+The pipeline is a single long orchestrator (`runPipeline`) calling into a large bag of functions (`photo-pipeline.ts`, ~2700 lines). Adding new strategies (Bayesian, BFS, multi-threshold) on top of this will compound the complexity. Some structural directions to consider:
+
+**Stage-based pipeline with explicit data flow.** Each stage is a function with a typed input and typed output. Stages compose linearly (or branch). The orchestrator just chains them — no ambient state. Makes it easy to swap, skip, or insert stages without touching the rest.
+
+```
+Input → ClassifyInput → FindBoard → Rectify → FindGrid → Dewarp → Classify → Output
+```
+
+**Strategy pattern for grid detection.** Grid detection isn't one algorithm — it's a family. Define an interface (`GridDetector`) and let different strategies implement it: the current vote-and-fit, a future Bayesian approach, a BFS crawler, etc. The orchestrator picks or combines strategies based on input type, confidence, or user preference.
+
+**Confidence as a first-class data type.** Instead of stages returning "the answer," they return an answer with uncertainty attached. Downstream stages can use this: low-confidence grid → ask user for input, or try a different strategy. This is the Bayesian idea applied to the software architecture, not just the math.
+
+**Separate feature extraction from model fitting.** Currently `detectGrid` does both — it extracts Harris corners, circles, Hough lines AND fits the grid model. If feature extraction were a separate step, multiple model-fitting strategies could share the same features. The multi-threshold Canny tensor idea fits here naturally as a richer feature extraction layer.
+
+**Mat lifecycle management.** OpenCV Mats are the main source of incidental complexity — manual allocation/deletion, leak risk, can't pass freely between stages. A `MatScope` helper that collects Mats and bulk-deletes them on scope exit would formalize the pattern already used ad-hoc (`toDelete` / `mat()` in `runPipeline`). Each stage function gets its own scope for temporaries; Mats that need to survive are tracked by the caller's scope. Low-risk, incrementally adoptable (convert one function at a time), eliminates "forgot to delete" bugs.
+
+```typescript
+class MatScope {
+  private mats: CvMat[] = [];
+  track<T extends CvMat>(m: T): T { this.mats.push(m); return m; }
+  release() { for (const m of this.mats) { try { m.delete(); } catch {} } this.mats.length = 0; }
+  run<T>(fn: (scope: MatScope) => T): T { try { return fn(this); } finally { this.release(); } }
+}
+```
+
 ## Eval and testing infrastructure
 
 - **Unit tests** (`test/photo-pipeline.test.js`): test pipeline functions in isolation
