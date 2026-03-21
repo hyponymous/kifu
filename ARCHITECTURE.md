@@ -182,6 +182,26 @@ Coarse-then-fine: first pass gives rough intersections; one dewarp + re-detect i
 - **Board vs background**: contour detection struggles when board and surface (e.g. wood floor) share similar color/tone.
 - **Lighting variation**: white stones appear gray or translucent under warm/dim light, breaking global brightness classification.
 
+### Alternative grid detection approaches (brainstorm)
+
+The current vote-and-fit pipeline (Harris + HoughCircles + HoughLines → bin → fitGrid) works well for diagrams but struggles with real-world photos: wood grain, stone bowls, and floor produce too many spurious features, and the result is sensitive to getting the initial bounds right.
+
+These approaches are not mutually exclusive — several could combine.
+
+**Multi-threshold Canny tensor.** Instead of one (lo, hi) threshold pair, compute edges at 5–10 pairs and stack them into a volume. A pixel that's an edge across many thresholds is a "strong" edge (grid line); one that only appears at low thresholds is "weak" (wood grain). Grid line features would have high support across the stack; noise would not. This gives a soft edge strength measure while preserving Canny's directional/NMS benefits over raw gradient magnitude. Each threshold layer can be treated as an independent observation in a probabilistic model.
+
+**Frequency-domain grid finding.** The board has a strong periodic signal (regularly-spaced grid lines). 2D FFT of the rectified image should show peaks at the grid spatial frequency. Peak location → step size and angle directly. Phase alignment → grid origin. Robust to local noise because it uses global periodic structure. Autocorrelation (spatial domain equivalent) is another way to extract the same signal.
+
+**Vanishing point perspective recovery.** Instead of rectify-then-detect, detect the two families of converging lines first. Their vanishing points define the homography. This could replace contour-based board detection entirely and works naturally for angled shots. Barrel distortion can be calibrated from the grid lines themselves (straight lines that appear curved → solve for radial distortion coefficients).
+
+**Local crawling / BFS grid discovery.** Seed from a high-confidence feature (detected stone, clear line intersection), then explore outward by following local edge/gradient evidence to adjacent intersections at the expected spacing. Build the grid incrementally. No global bounds needed — the grid grows organically and stops when evidence drops below threshold (board edge). Naturally handles partial boards, occlusion, and even perspective (the local step/angle adapts across the image). Could be formulated as RL or as a simpler greedy BFS.
+
+**Bayesian grid inference.** Define a generative model: grid parameters (center, step, angle, N, perspective, distortion) → predicted image features (line positions, circle positions, edge density patterns). Invert: given observed features, infer the posterior over grid parameters. Key benefits: (1) calibrated uncertainty — occluded regions have wide posterior, clear regions have narrow, rather than the algorithm failing or guessing; (2) active learning — present low-confidence regions to the user for targeted input ("is there a stone here?", "does the grid extend this far?"), resolving ambiguity efficiently; (3) multi-threshold Canny layers and other feature sources are naturally incorporated as independent observations that tighten the posterior. Implementation could range from MAP estimation to MCMC to variational inference.
+
+**RANSAC grid model.** Sample small subsets of detected features, fit a full grid model (origin, step, angle, dimensions), score by how many other features agree. The regularity constraint rejects spurious features that don't fit the periodic pattern. Lightweight version of Bayesian inference.
+
+**Iterative re-bounding.** Run a first pass with loose or no bounds to get approximate grid geometry, then derive tight bounds from the detected grid's center and step, and re-run. Addresses the bootstrap problem where good bounds require knowing the grid, but finding the grid requires good bounds.
+
 ## Eval and testing infrastructure
 
 - **Unit tests** (`test/photo-pipeline.test.js`): test pipeline functions in isolation
