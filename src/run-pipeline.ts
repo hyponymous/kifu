@@ -159,7 +159,8 @@ interface OffsetSamplingResult {
   uniColX: number[];
   uniOutW: number;
   uniOutH: number;
-  uniStep: number;
+  uniStepX: number;
+  uniStepY: number;
   uniPad: number;
   stepX: number;
   stepY: number;
@@ -262,12 +263,17 @@ function stageOffsetSampling(
   const nR = snappedRows.length, nC = snappedCols.length;
   const stepY = nR > 1 ? (snappedRows[nR - 1] - snappedRows[0]) / (nR - 1) : 1;
   const stepX = nC > 1 ? (snappedCols[nC - 1] - snappedCols[0]) / (nC - 1) : 1;
-  const uniStep = Math.max(stepX, stepY);
-  const uniPad = uniStep;
-  const uniRowY = Array.from({ length: nR }, (_, i) => uniPad + i * uniStep);
-  const uniColX = Array.from({ length: nC }, (_, j) => uniPad + j * uniStep);
-  const uniOutW = Math.round(2 * uniPad + (nC - 1) * uniStep);
-  const uniOutH = Math.round(2 * uniPad + (nR - 1) * uniStep);
+  // Preserve the grid's natural aspect ratio (stepY/stepX) in the output.
+  // A square board photographed overhead has stepX ≈ stepY; a non-square board
+  // (e.g. Japanese 15:14) or oblique angle has stepX ≠ stepY.  Forcing both to
+  // the same value would distort circular stones into ellipses.
+  const uniStepX = stepX;
+  const uniStepY = stepY;
+  const uniPad = Math.max(uniStepX, uniStepY);
+  const uniRowY = Array.from({ length: nR }, (_, i) => uniPad + i * uniStepY);
+  const uniColX = Array.from({ length: nC }, (_, j) => uniPad + j * uniStepX);
+  const uniOutW = Math.round(2 * uniPad + (nC - 1) * uniStepX);
+  const uniOutH = Math.round(2 * uniPad + (nR - 1) * uniStepY);
 
   const { yXs, yYs, xXs, xYs, tpsYPoints, tpsXPoints } = fns.collectOffsetSamples(
     rectGray, snappedRows, snappedCols, effectiveCannyLo, effectiveCannyHi,
@@ -276,7 +282,7 @@ function stageOffsetSampling(
   const { yCoeffs, xCoeffs } = fns.fitSeparableQuadratic(yXs, yYs, xXs, xYs);
 
   return { yCoeffs, xCoeffs, tpsYPoints, tpsXPoints,
-           uniRowY, uniColX, uniOutW, uniOutH, uniStep, uniPad, stepX, stepY };
+           uniRowY, uniColX, uniOutW, uniOutH, uniStepX, uniStepY, uniPad, stepX, stepY };
 }
 
 function stageTpsFit(
@@ -288,10 +294,10 @@ function stageTpsFit(
   offset: OffsetSamplingResult,
 ): TPSFitResult {
   const { yCoeffs, xCoeffs, tpsYPoints, tpsXPoints,
-          uniRowY, uniColX, uniOutW, uniOutH, uniStep, uniPad, stepX, stepY } = offset;
+          uniRowY, uniColX, uniOutW, uniOutH, uniStepX, uniStepY, uniPad, stepX, stepY } = offset;
 
-  const uni2snapY = (u: number) => snappedRows[0] + (u - uniPad) / uniStep * stepY;
-  const uni2snapX = (u: number) => snappedCols[0] + (u - uniPad) / uniStep * stepX;
+  const uni2snapY = (u: number) => snappedRows[0] + (u - uniPad) / uniStepY * stepY;
+  const uni2snapX = (u: number) => snappedCols[0] + (u - uniPad) / uniStepX * stepX;
 
   const cleanY = fns.ransacFilter(tpsYPoints,
     (pt: TPSPoint) => uni2snapY(pt.y) + fns.polyEval(yCoeffs, uni2snapY(pt.y)), cfg.ransacThr);
