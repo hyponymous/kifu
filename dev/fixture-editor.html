@@ -57,9 +57,12 @@
   <div class="row">
     <button id="tool-move" class="tool-btn active">Move</button>
     <button id="tool-fit" class="tool-btn">Fit</button>
+    <button id="tool-lens" class="tool-btn">Lens</button>
     <span style="color:#444; margin:0 0.1rem;">|</span>
     <button id="pin-corners-btn">Pin Corners</button>
     <button id="reset-dots-btn">Reset</button>
+    <button id="lens-apply-btn" hidden>Apply → Fit</button>
+    <button id="lens-reset-btn" hidden>Reset Lens</button>
     <span style="color:#444; margin:0 0.1rem;">|</span>
     <button id="toggle-dumbbells" class="tool-btn">Dumbbells</button>
   </div>
@@ -130,6 +133,11 @@
     // Dumbbell overlay toggle
     let showDumbbells = false;
 
+    // ── Lens tool state ───────────────────────────────────────────────────
+    let lensCorners = [];         // 4 points [{x,y}, ...] — board corners in image space
+    let lensDragging = null;      // 'corner-0'..'corner-3' or null
+    let lastFocusPoint = null;    // {x,y} in image coords — last clicked/dragged handle
+
     // ── Resolve project-root-relative image path ────────────────────────────
     // Probes /kifu/fixtures/ and /kifu/fixtures/real/ to find where the image
     // actually lives in the repo, so the fixture JSON stores the correct path.
@@ -141,6 +149,49 @@
         } catch {}
       }
       return `fixtures/real/${filename}`; // best-guess default for new real photos
+    }
+
+    // ── Lens math ──────────────────────────────────────────────────────────
+
+    /** Compute 3x3 homography from 4 source points to 4 dest points using OpenCV */
+    function computeHomography(srcQuad, dstQuad) {
+      const src = cv.matFromArray(4, 1, cv.CV_32FC2,
+        srcQuad.flatMap(p => [p.x, p.y]));
+      const dst = cv.matFromArray(4, 1, cv.CV_32FC2,
+        dstQuad.flatMap(p => [p.x, p.y]));
+      const M = cv.getPerspectiveTransform(src, dst);
+      /** @type {Float64Array} */
+      const H = new Float64Array(9);
+      for (let i = 0; i < 9; i++) H[i] = M.doubleAt(Math.floor(i / 3), i % 3);
+      src.delete(); dst.delete(); M.delete();
+      return H;
+    }
+
+    /** Apply 3x3 homography to a point */
+    function applyHomography(H, x, y) {
+      const w = H[6] * x + H[7] * y + H[8];
+      return {
+        x: (H[0] * x + H[1] * y + H[2]) / w,
+        y: (H[3] * x + H[4] * y + H[5]) / w,
+      };
+    }
+
+    /**
+     * Lens model: board grid (r,c) → image position via homography.
+     * Requires lensCorners.length === 4.
+     */
+    function lensModelPoint(r, c) {
+      const u = nCols > 1 ? c / (nCols - 1) : 0.5;
+      const v = nRows > 1 ? r / (nRows - 1) : 0.5;
+      const unitSquare = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }];
+      const H = computeHomography(unitSquare, lensCorners);
+      return applyHomography(H, u, v);
+    }
+
+    /** Reset all lens state */
+    function resetLens() {
+      lensCorners = [];
+      lensDragging = null;
     }
 
     // ── Load image ──────────────────────────────────────────────────────────
@@ -162,6 +213,7 @@
         pipelineDots = null;
         pinnedDots.clear();
         lastFit = null;
+        resetLens();
         lastRectCorners = null;
         lastRectW = 0; lastRectH = 0;
         el('board-rows').value = '';
@@ -221,6 +273,56 @@
         }
       }
 
+      // Lens tool overlay
+      if (activeTool === 'lens') {
+        const handleR = Math.max(8, sourceW / 60) / viewport.scale;
+        const lineW = Math.max(1.5, sourceW / 400) / viewport.scale;
+
+        // Draw corner handles
+        const cornerColors = ['#f44', '#f80', '#0af', '#0c6'];
+        for (let i = 0; i < lensCorners.length; i++) {
+          const p = lensCorners[i];
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, handleR, 0, 2 * Math.PI);
+          ctx.fillStyle = cornerColors[i];
+          ctx.globalAlpha = 0.7;
+          ctx.fill();
+          ctx.globalAlpha = 1;
+          ctx.strokeStyle = cornerColors[i];
+          ctx.lineWidth = lineW;
+          ctx.stroke();
+        }
+
+        // Draw grid + midpoint handles after 4 corners placed
+        if (lensCorners.length === 4 && nRows >= 2 && nCols >= 2) {
+          // Grid lines via lens model
+          const steps = 40;
+          ctx.strokeStyle = 'rgba(220, 200, 80, 0.7)';
+          ctx.lineWidth = Math.max(2.5, sourceW / 300) / viewport.scale;
+          // Row curves
+          for (let r = 0; r < nRows; r++) {
+            ctx.beginPath();
+            for (let s = 0; s <= steps; s++) {
+              const c = s * (nCols - 1) / steps;
+              const p = lensModelPoint(r, c);
+              if (s === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+            }
+            ctx.stroke();
+          }
+          // Column curves
+          for (let c = 0; c < nCols; c++) {
+            ctx.beginPath();
+            for (let s = 0; s <= steps; s++) {
+              const r = s * (nRows - 1) / steps;
+              const p = lensModelPoint(r, c);
+              if (s === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+            }
+            ctx.stroke();
+          }
+
+        }
+      }
+
       // Dumbbell overlay: pipeline → current position
       if (showDumbbells && pipelineDots && inputDots) {
         const baseDotRadius = Math.max(6, sourceW / 80);
@@ -246,7 +348,7 @@
         }
       }
 
-      if (inputDots) {
+      if (inputDots && activeTool !== 'lens') {
         const baseDotRadius = Math.max(6, sourceW / 80);
         const dotRadius = baseDotRadius / viewport.scale;
         ctx.lineWidth = Math.max(1, sourceW / 600) / viewport.scale;
@@ -298,7 +400,7 @@
     }
 
     // ── Tool & pin state ────────────────────────────────────────────────────
-    let activeTool = 'move'; // 'move' | 'fit'
+    let activeTool = 'move'; // 'move' | 'fit' | 'lens'
     let pinnedDots = new Set(); // indices into inputDots
     let lastFit = null; // { coeffsX, coeffsY, degree } or null
 
@@ -359,7 +461,7 @@
     // ── Metrics display ──────────────────────────────────────────────────────
     function updateMetrics() {
       const metricsEl = el('metrics');
-      if (!inputDots || !pipelineDots || !editableStones) {
+      if (!inputDots || !editableStones) {
         metricsEl.textContent = '';
         return;
       }
@@ -371,15 +473,19 @@
           else if (s === 'W') wCount++;
         }
       }
-      // Displacement stats
-      let sum = 0, max = 0;
-      for (let i = 0; i < inputDots.length; i++) {
-        const d = Math.hypot(inputDots[i].x - pipelineDots[i].x, inputDots[i].y - pipelineDots[i].y);
-        sum += d;
-        if (d > max) max = d;
+      // Displacement stats (only when both arrays match)
+      if (pipelineDots && pipelineDots.length === inputDots.length) {
+        let sum = 0, max = 0;
+        for (let i = 0; i < inputDots.length; i++) {
+          const d = Math.hypot(inputDots[i].x - pipelineDots[i].x, inputDots[i].y - pipelineDots[i].y);
+          sum += d;
+          if (d > max) max = d;
+        }
+        const mean = sum / inputDots.length;
+        metricsEl.textContent = `B:${bCount} W:${wCount} · mean Δ ${mean.toFixed(1)}px max ${max.toFixed(1)}px`;
+      } else {
+        metricsEl.textContent = `B:${bCount} W:${wCount}`;
       }
-      const mean = sum / inputDots.length;
-      metricsEl.textContent = `B:${bCount} W:${wCount} · mean Δ ${mean.toFixed(1)}px max ${max.toFixed(1)}px`;
     }
 
     // ── Tool palette ─────────────────────────────────────────────────────────
@@ -387,6 +493,9 @@
       activeTool = tool;
       el('tool-move').classList.toggle('active', tool === 'move');
       el('tool-fit').classList.toggle('active', tool === 'fit');
+      el('tool-lens').classList.toggle('active', tool === 'lens');
+      el('lens-apply-btn').hidden = tool !== 'lens';
+      el('lens-reset-btn').hidden = tool !== 'lens';
       if (refit && tool === 'fit' && pinnedDots.size >= 3) refitAndRedraw();
       else drawInputCanvas();
     }
@@ -395,6 +504,72 @@
     el('tool-fit').addEventListener('click', () => {
       setActiveTool('fit');
       if (pinnedDots.size >= 3) runPipeline({ forcedGrid: inputDots });
+    });
+
+    el('tool-lens').addEventListener('click', () => {
+      if (lensCorners.length === 0 && sourceImage && nRows >= 2 && nCols >= 2) {
+        // Auto-place corners at board extent (from inputDots or image margins)
+        let x0, y0, x1, y1;
+        if (inputDots && inputDots.length > 0) {
+          x0 = Infinity; y0 = Infinity; x1 = -Infinity; y1 = -Infinity;
+          for (const d of inputDots) {
+            if (d.r === 0 && d.c === 0) { x0 = d.x; y0 = d.y; }
+            if (d.r === 0 && d.c === nCols - 1) { x1 = Math.max(x1, d.x); y0 = Math.min(y0, d.y); }
+            if (d.r === nRows - 1 && d.c === nCols - 1) { x1 = Math.max(x1, d.x); y1 = Math.max(y1, d.y); }
+            if (d.r === nRows - 1 && d.c === 0) { x0 = Math.min(x0, d.x); y1 = Math.max(y1, d.y); }
+          }
+          // Use actual corner dot positions
+          const tl = inputDots.find(d => d.r === 0 && d.c === 0);
+          const tr = inputDots.find(d => d.r === 0 && d.c === nCols - 1);
+          const br = inputDots.find(d => d.r === nRows - 1 && d.c === nCols - 1);
+          const bl = inputDots.find(d => d.r === nRows - 1 && d.c === 0);
+          if (tl && tr && br && bl) {
+            lensCorners = [
+              { x: tl.x, y: tl.y }, { x: tr.x, y: tr.y },
+              { x: br.x, y: br.y }, { x: bl.x, y: bl.y },
+            ];
+          }
+        }
+        if (lensCorners.length === 0) {
+          const m = 0.05;
+          lensCorners = [
+            { x: sourceW * m, y: sourceH * m }, { x: sourceW * (1 - m), y: sourceH * m },
+            { x: sourceW * (1 - m), y: sourceH * (1 - m) }, { x: sourceW * m, y: sourceH * (1 - m) },
+          ];
+        }
+      }
+      setActiveTool('lens');
+      el('status').textContent = 'Lens: drag corners to match board.';
+    });
+
+    el('lens-reset-btn').addEventListener('click', () => {
+      resetLens();
+      drawInputCanvas();
+    });
+
+    el('lens-apply-btn').addEventListener('click', () => {
+      if (lensCorners.length !== 4 || nRows < 2 || nCols < 2) return;
+      // Compute all intersection positions via lens model
+      inputDots = [];
+      for (let r = 0; r < nRows; r++) {
+        for (let c = 0; c < nCols; c++) {
+          const p = lensModelPoint(r, c);
+          inputDots.push({ x: p.x, y: p.y, r, c });
+        }
+      }
+      pipelineDots = inputDots.map(d => ({ x: d.x, y: d.y, r: d.r, c: d.c }));
+      // Pin every 4th intersection + all edge intersections
+      pinnedDots.clear();
+      for (let r = 0; r < nRows; r++) {
+        for (let c = 0; c < nCols; c++) {
+          const isEdge = r === 0 || r === nRows - 1 || c === 0 || c === nCols - 1;
+          const isSparse = r % 4 === 0 && c % 4 === 0;
+          if (isEdge || isSparse) pinnedDots.add(r * nCols + c);
+        }
+      }
+      setActiveTool('fit', { refit: false });
+      refitAndRedraw({ reclassify: true });
+      el('status').textContent = 'Lens → Fit: grid applied, pinned sparse subset. Fine-tune with TPS.';
     });
 
     el('pin-corners-btn').addEventListener('click', () => {
@@ -434,7 +609,24 @@
     }
 
     // ── Tab zoom cycling ─────────────────────────────────────────────────────
+    function zoomToPoint(ix, iy, scale = 4) {
+      viewport.scale = scale;
+      viewport.panX = canvasInput.width / 2 - ix * scale;
+      viewport.panY = canvasInput.height / 2 - iy * scale;
+      drawInputCanvas();
+    }
+
+    canvasInput.addEventListener('dblclick', e => {
+      const { x, y } = screenToImage(e.clientX, e.clientY);
+      lastFocusPoint = { x, y };
+      zoomToPoint(x, y);
+    });
+
     document.addEventListener('keydown', e => {
+      if (e.key === '+' || e.key === '=') {
+        if (lastFocusPoint) zoomToPoint(lastFocusPoint.x, lastFocusPoint.y);
+        return;
+      }
       if (e.key === '-') {
         viewport = { scale: 1, panX: 0, panY: 0 };
         tabZoomIndex = -1;
@@ -443,19 +635,35 @@
       }
       if (e.key !== 'Tab') return;
       e.preventDefault();
-      const pinList = [...pinnedDots].sort((a, b) => a - b);
-      if (pinList.length === 0) return;
-      tabZoomIndex++;
-      if (tabZoomIndex >= pinList.length) tabZoomIndex = -1;
+
+      // Build cycle list depending on active tool
+      /** @type {{x: number, y: number}[]} */
+      let cyclePoints = [];
+      if (activeTool === 'lens') {
+        for (const p of lensCorners) cyclePoints.push(p);
+      } else {
+        const pinList = [...pinnedDots].sort((a, b) => a - b);
+        for (const idx of pinList) cyclePoints.push(inputDots[idx]);
+      }
+      if (cyclePoints.length === 0) return;
+
+      // Advance or reverse; -1 = zoomed out
+      const total = cyclePoints.length;
+      if (e.shiftKey) {
+        tabZoomIndex = tabZoomIndex <= -1 ? total - 1 : tabZoomIndex - 1;
+      } else {
+        tabZoomIndex++;
+        if (tabZoomIndex >= total) tabZoomIndex = -1;
+      }
+
       if (tabZoomIndex === -1) {
         viewport = { scale: 1, panX: 0, panY: 0 };
+        drawInputCanvas();
       } else {
-        const dot = inputDots[pinList[tabZoomIndex]];
-        viewport.scale = 4;
-        viewport.panX = canvasInput.width / 2 - dot.x * 4;
-        viewport.panY = canvasInput.height / 2 - dot.y * 4;
+        const p = cyclePoints[tabZoomIndex];
+        lastFocusPoint = { x: p.x, y: p.y };
+        zoomToPoint(p.x, p.y);
       }
-      drawInputCanvas();
     });
 
     function pinCorners() {
@@ -543,8 +751,39 @@
     let isPanning = false;
     let panStart = { x: 0, y: 0 };
 
+    /** Find nearest lens corner handle within hit radius. Returns 'corner-N' or null. */
+    function findLensHandle(ix, iy) {
+      const hitR = Math.max(12, sourceW / 50) / viewport.scale;
+      let best = null, bestDist = hitR;
+      for (let i = 0; i < lensCorners.length; i++) {
+        const d = Math.hypot(lensCorners[i].x - ix, lensCorners[i].y - iy);
+        if (d < bestDist) { bestDist = d; best = `corner-${i}`; }
+      }
+      return best;
+    }
+
     canvasInput.addEventListener('mousedown', e => {
       const { x, y } = screenToImage(e.clientX, e.clientY);
+
+      if (activeTool === 'lens') {
+        // Try to grab an existing handle
+        const handle = findLensHandle(x, y);
+        if (handle) {
+          lensDragging = handle;
+          dragStart = { x, y };
+          const idx = +handle.split('-')[1];
+          dragDotStart = { x: lensCorners[idx].x, y: lensCorners[idx].y };
+          didDrag = false;
+          e.preventDefault();
+          return;
+        }
+        // Otherwise pan
+        isPanning = true;
+        panStart = { x: e.clientX, y: e.clientY };
+        e.preventDefault();
+        return;
+      }
+
       const dotIdx = findNearestDot(x, y);
 
       if (dotIdx >= 0) {
@@ -580,6 +819,15 @@
     });
 
     window.addEventListener('mousemove', e => {
+      if (lensDragging) {
+        const { x, y } = screenToImage(e.clientX, e.clientY);
+        const dx = x - dragStart.x, dy = y - dragStart.y;
+        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) didDrag = true;
+        const i = +lensDragging.split('-')[1];
+        lensCorners[i] = { x: dragDotStart.x + dx, y: dragDotStart.y + dy };
+        drawInputCanvas();
+        return;
+      }
       if (draggingDot >= 0) {
         const { x, y } = screenToImage(e.clientX, e.clientY);
         const dx = x - dragStart.x;
@@ -602,7 +850,16 @@
     });
 
     window.addEventListener('mouseup', e => {
-      if (draggingDot >= 0 && didDrag) runPipeline({ forcedGrid: inputDots });
+      if (lensDragging) {
+        const i = +lensDragging.split('-')[1];
+        lastFocusPoint = { x: lensCorners[i].x, y: lensCorners[i].y };
+        lensDragging = null;
+        return;
+      }
+      if (draggingDot >= 0) {
+        lastFocusPoint = { x: inputDots[draggingDot].x, y: inputDots[draggingDot].y };
+        if (didDrag) runPipeline({ forcedGrid: inputDots });
+      }
       draggingDot = -1;
       // Fit mode: click without drag
       if (clickedDot >= 0 && activeTool === 'fit' && !didDrag) {
@@ -664,6 +921,24 @@
       if (e.touches.length === 1) {
         const t = e.touches[0];
         const { x, y } = screenToImage(t.clientX, t.clientY);
+
+        // Lens mode touch handling
+        if (activeTool === 'lens') {
+          const handle = findLensHandle(x, y);
+          if (handle) {
+            lensDragging = handle;
+            touchDragStart = { x, y };
+            touchDidDrag = false;
+            const idx = +handle.split('-')[1];
+            touchDotStart = { x: lensCorners[idx].x, y: lensCorners[idx].y };
+            e.preventDefault();
+            return;
+          }
+          touchPanStart = { x: t.clientX, y: t.clientY };
+          e.preventDefault();
+          return;
+        }
+
         const dotIdx = findNearestDot(x, y);
         if (dotIdx >= 0) {
           touchDotWasPinned = pinnedDots.has(dotIdx);
@@ -695,7 +970,16 @@
     }, { passive: false });
 
     canvasInput.addEventListener('touchmove', e => {
-      if (e.touches.length === 1 && touchDragDot >= 0 && touchDotStart) {
+      if (e.touches.length === 1 && lensDragging && touchDotStart) {
+        const t = e.touches[0];
+        const { x, y } = screenToImage(t.clientX, t.clientY);
+        const dx = x - touchDragStart.x, dy = y - touchDragStart.y;
+        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) touchDidDrag = true;
+        const i = +lensDragging.split('-')[1];
+        lensCorners[i] = { x: touchDotStart.x + dx, y: touchDotStart.y + dy };
+        drawInputCanvas();
+        e.preventDefault();
+      } else if (e.touches.length === 1 && touchDragDot >= 0 && touchDotStart) {
         const t = e.touches[0];
         const { x, y } = screenToImage(t.clientX, t.clientY);
         const dx = x - touchDragStart.x;
@@ -744,6 +1028,7 @@
     canvasInput.addEventListener('touchend', e => {
       if (e.touches.length < 2) pinchStart = null;
       if (e.touches.length === 0) {
+        if (lensDragging) { lensDragging = null; touchDragStart = null; touchDotStart = null; return; }
         if (touchDragDot >= 0 && touchDidDrag) runPipeline({ forcedGrid: inputDots });
         if (touchDragDot >= 0 && activeTool === 'fit' && !touchDidDrag) {
           if (touchDotWasPinned) {
@@ -1046,6 +1331,12 @@
 
       const fixture = { image, boardRows: R, boardCols: C, stones };
       if (origIntersections) fixture.intersections = origIntersections;
+      if (lensCorners.length === 4) {
+        fixture.boardCorners = lensCorners.map(p => [
+          Math.round(p.x * 10) / 10,
+          Math.round(p.y * 10) / 10,
+        ]);
+      }
       return fixture;
     }
 
@@ -1091,6 +1382,12 @@
         }));
         pinCorners();
         setActiveTool('move');
+      }
+
+      // Restore lens state if present
+      if (fixture.boardCorners && fixture.boardCorners.length === 4) {
+        lensCorners = fixture.boardCorners.map(p => ({ x: p[0], y: p[1] }));
+        setActiveTool('lens');
       }
 
       drawBoard();
