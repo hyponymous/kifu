@@ -160,13 +160,73 @@ Per-intersection combination: group line-y measurements by row, line-x by column
 
 Coarse-then-fine: first pass gives rough intersections; one dewarp + re-detect iteration is usually sufficient.
 
+## Physical and geometric assumptions
+
+These assumptions underpin grid detection, perspective recovery, and stone classification across both input categories. They define what the pipeline can rely on and what it must be robust to.
+
+### Diagrams (book pages, screenshots, app renders)
+
+**Geometry:**
+- Grid spacing is uniform in both axes
+- Grid aspect ratio is exactly square (row spacing = column spacing)
+- Board boundary is typically close to axis-aligned but may have perspective (book photos taken at an angle)
+- Page curl may introduce smooth, locally-affine warping (book spine)
+
+**Stones:**
+- Stones are circles with diameter approximately equal to the grid spacing
+- All stones of a given color are the same size and shape
+- Stones are flat (no 3D shading, no shadows)
+- High contrast between stones and board: black stones are near-black, white stones are near-white
+- Some diagrams place number labels at stone centers
+
+**Board:**
+- Board background is a uniform color (tan, white, or gray)
+- Grid lines are thin, uniform, high-contrast
+
+### Real-world board photos
+
+**Scene geometry:**
+- Camera is a pinhole (or near-pinhole) with negligible barrel distortion at board-photo distances
+- The board surface is a flat plane in 3D
+- The image is a perspective projection of this plane — a homography maps board-plane coordinates to image pixels
+- Camera is roughly overhead but not necessarily nadir; oblique angles up to ~30-40 degrees from vertical are common
+
+**Grid:**
+- Grid lines are evenly spaced in 3D board-plane coordinates
+- Grid aspect ratio is intentionally non-square on traditional boards: vertical spacing is ~8% larger than horizontal (~23.7 mm vs ~22 mm on standard boards), designed so the board appears square from the player's viewing angle. Budget boards may be exactly square.
+- Under perspective, evenly-spaced grid lines map to lines that converge toward vanishing points
+- Grid spacing in image pixels varies across the board (closer side appears larger)
+
+**Stones:**
+- Stones are convex solids (biconvex, single-convex, or flat-bottomed depending on style)
+- Stone diameter is approximately equal to the grid spacing
+- Stone thickness above the board surface varies widely by style: ~1/5 of grid spacing (thin flat stones) to ~1/2 (thick biconvex clamshell/slate)
+- Because stones have height, their apparent image position shifts relative to the grid intersection beneath them — the shift depends on camera angle and the stone's position relative to the camera's principal point
+- All stones of a given color are approximately the same shape and size
+- Stones may have specular highlights (white stones especially) and cast shadows
+- Stone edges produce strong radial gradients, but the exact edge profile differs from the sharp printed circles in diagrams
+
+**Lighting and appearance:**
+- Lighting direction and intensity vary across the board
+- White stones can appear gray or warm-tinted under non-neutral lighting
+- Wood grain on real boards produces texture noise in gradients and edges
+- Board color varies (blonde, amber, dark) and may be close to the background surface color
+
+### Derived constraints for perspective recovery
+
+From the assumptions above:
+
+1. **4 corners suffice for homography.** Since the board is planar and the projection is perspective, the mapping from board coordinates to image pixels is fully determined by a 3x3 homography (8 DOF). Four point correspondences (the board corners) determine it exactly.
+
+2. **Grid lines are straight in the image.** Perspective preserves lines. Even under oblique viewing, each grid line maps to a straight line (not a curve). This means any visible curvature in grid lines is due to lens distortion, not perspective — and we assume lens distortion is negligible.
+
+3. **Grid intersections are determined by the 4 corners.** Given the homography and the board dimensions (nRows x nCols), every intersection position in the image can be computed without any additional detection — just evaluate the homography at the normalized grid coordinates.
+
+4. **Stone parallax is bounded but variable.** Stone height ranges from ~1/5 to ~1/2 of grid spacing. At 30 degrees from vertical, the apparent shift of a stone center relative to its grid intersection ranges from ~0.2 * tan(30) ~ 0.12 to ~0.5 * tan(30) ~ 0.29 grid spacings. This is small for thin stones but significant for thick ones — it's a source of systematic error in grid-based stone localization.
+
+5. **Perspective provides an independent grid estimate.** The pipeline currently detects intersections bottom-up (features → model). The perspective model provides a complementary top-down estimate (corners → homography → all intersections). Comparing the two gives a quality signal: agreement means both are right; disagreement flags problems. The perspective model can also seed or constrain the bottom-up detection.
+
 ## Real-world board photos
-
-### Assumptions (current scope)
-
-- There is a valid board in the image
-- Overhead photo with roughly axis-aligned board
-- 19×19 grid
 
 ### Approach
 
