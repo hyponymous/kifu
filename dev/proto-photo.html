@@ -144,6 +144,14 @@
       <canvas id="canvas-edges"></canvas>
     </div>
     <div class="stage">
+      <div class="stage-label">raw quads</div>
+      <canvas id="canvas-raw-quads"></canvas>
+    </div>
+    <div class="stage">
+      <div class="stage-label">quad grid</div>
+      <canvas id="canvas-quad-grid"></canvas>
+    </div>
+    <div class="stage">
       <div class="stage-label">rectified</div>
       <canvas id="canvas-rectified"></canvas>
     </div>
@@ -239,6 +247,7 @@
       nearestIndex, buildIntersections,
       extractStonePatches,
       generateSGF,
+      multiThresholdCanny, deleteCannyStack, DEFAULT_CANNY_THRESHOLDS,
     } from '../photo-pipeline';
     import { runPipeline as sharedRunPipeline } from '../run-pipeline';
     import { activeDefaults } from '../pipeline-defaults';
@@ -472,16 +481,54 @@
       if (item) blobToCanvas(item.getAsFile());
     });
 
-    function blobToCanvas(blob) {
+    let currentFilename = '';
+
+    /** Resolves when fixture is loaded (or not found). */
+    let fixtureReady = Promise.resolve();
+
+    function blobToCanvas(blob, filename) {
       const url = URL.createObjectURL(blob);
       const img = new Image();
       img.onload = () => { loadSource(img); URL.revokeObjectURL(url); };
       img.src = url;
+      currentFilename = filename || '';
+      fixtureReady = tryLoadFixture();
+    }
+
+    /**
+     * Try to fetch a fixture JSON for the current image filename.
+     * Sets window._fixtureIntersections and window._fixtureBoardSize on success.
+     * Mirrors the fixture-editor's approach (try fixtures/real/ then fixtures/).
+     * Returns a promise that resolves when done (success or failure).
+     */
+    async function tryLoadFixture() {
+      window._fixtureIntersections = null;
+      window._fixtureBoardSize = null;
+      if (!currentFilename) return;
+      const base = currentFilename.replace(/\.[^.]+$/, '');
+      const t = Date.now();
+      const candidates = [
+        `/kifu/fixtures/real/${base}.fixture.json`,
+        `/kifu/fixtures/${base}.fixture.json`,
+      ];
+      for (const url of candidates) {
+        try {
+          const r = await fetch(`${url}?t=${t}`);
+          if (!r.ok) continue;
+          const data = await r.json();
+          if (!data || !data.intersections) continue;
+          window._fixtureIntersections = data.intersections;
+          window._fixtureBoardSize = data.boardRows || 19;
+          console.log(`[fixture] loaded ${data.intersections.length} intersections from ${base}.fixture.json`);
+          return;
+        } catch { /* try next */ }
+      }
     }
 
     // ── File picker ────────────────────────────────────────────────────────────
     el('file-input').addEventListener('change', e => {
-      if (e.target.files[0]) blobToCanvas(e.target.files[0]);
+      const file = e.target.files[0];
+      if (file) blobToCanvas(file, file.name);
     });
 
     // ── Drag and drop (whole window) ───────────────────────────────────────────
@@ -492,7 +539,7 @@
         .find(i => i.kind === 'file' && i.type.startsWith('image/'))
         ?.getAsFile()
         ?? [...e.dataTransfer.files].find(f => f.type.startsWith('image/'));
-      if (file) blobToCanvas(file);
+      if (file) blobToCanvas(file, file.name);
     });
 
     // ── Camera ────────────────────────────────────────────────────────────────
@@ -552,6 +599,7 @@
 
     async function runPipeline(fullImage) {
       if (!imageLoaded) return;
+      await fixtureReady;
       if (pipelineRunning) {
         // Queue re-run after the current one finishes (prevents concurrent pipelines)
         pipelinePending = { fullImage };
@@ -573,6 +621,9 @@
         const src     = mat(cv.imread(canvasInput));
         const grayMat = mat(new cv.Mat());
         cv.cvtColor(src, grayMat, cv.COLOR_RGBA2GRAY);
+
+        // Quad grid detection (before pipeline, on raw grayscale)
+        drawQuadGrid(grayMat);
 
         const onIntermediate = (name, data) => {
           if (name === 'boardDetection' && data.edges) {
@@ -805,6 +856,874 @@
       ctx.fillText(total.toFixed(0) + 'ms', LABEL_W + PAD + BAR_W + PAD, totalY + ROW_H / 2);
 
       el('timing-wrap').style.display = '';
+    }
+
+    // ── Quad grid detection (VP consensus) ──────────────────────────────────
+
+    /**
+     * Find 4-vertex convex quads in a binary edge image.
+     * Dilate to close junction gaps, then contour → approxPolyDP → geometry filter.
+     */
+    function findQuadsInEdges(edges, W, H) {
+      const dilated   = new cv.Mat();
+      const kernel    = cv.Mat.ones(3, 3, cv.CV_8U);
+      const contours  = new cv.MatVector();
+      const hierarchy = new cv.Mat();
+
+      cv.dilate(edges, dilated, kernel);
+      cv.findContours(dilated, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+      dilated.delete(); kernel.delete(); hierarchy.delete();
+
+      const shortEdge = Math.min(W, H);
+      const minArea = (shortEdge / 80) ** 2;
+      const maxArea = (shortEdge / 6) ** 2;
+      const quads = [];
+
+      for (let i = 0; i < contours.size(); i++) {
+        const cnt = contours.get(i);
+        const area = cv.contourArea(cnt);
+        if (area < minArea || area > maxArea) continue;
+
+        const approx = new cv.Mat();
+        const peri = cv.arcLength(cnt, true);
+        cv.approxPolyDP(cnt, approx, 0.04 * peri, true);
+
+        if (approx.rows === 4 && cv.isContourConvex(approx)) {
+          // Extract vertices
+          const pts = [];
+          for (let j = 0; j < 4; j++) {
+            pts.push({ x: approx.data32S[j * 2], y: approx.data32S[j * 2 + 1] });
+          }
+
+          // Bounding rect aspect ratio check
+          const r = cv.boundingRect(approx);
+          const ar = r.width / r.height;
+          if (ar < 0.3 || ar > 3.0) { approx.delete(); continue; }
+
+          // Interior angle check
+          let anglesOk = true;
+          for (let j = 0; j < 4; j++) {
+            const p0 = pts[j];
+            const p1 = pts[(j + 1) % 4];
+            const p2 = pts[(j + 3) % 4];
+            const dx1 = p1.x - p0.x, dy1 = p1.y - p0.y;
+            const dx2 = p2.x - p0.x, dy2 = p2.y - p0.y;
+            const dot = dx1 * dx2 + dy1 * dy2;
+            const cross = Math.abs(dx1 * dy2 - dy1 * dx2);
+            const angle = Math.atan2(cross, dot) * 180 / Math.PI;
+            if (angle < 40 || angle > 140) { anglesOk = false; break; }
+          }
+          if (!anglesOk) { approx.delete(); continue; }
+
+          // Use contour winding order directly (approxPolyDP returns perimeter order).
+          // Ensure consistent CW winding via signed area.
+          const sa = (pts[0].x * (pts[1].y - pts[3].y) +
+                      pts[1].x * (pts[2].y - pts[0].y) +
+                      pts[2].x * (pts[3].y - pts[1].y) +
+                      pts[3].x * (pts[0].y - pts[2].y));
+          if (sa < 0) pts.reverse(); // make CW
+
+          const cx = pts.reduce((s, p) => s + p.x, 0) / 4;
+          const cy = pts.reduce((s, p) => s + p.y, 0) / 4;
+
+          // Reject quads whose implied VPs are too close to the centroid
+          // (implies an unrealistically extreme viewing angle)
+          const minVPDist = 0.5 * Math.sqrt(W * W + H * H);
+          const vpA = lineIntersection(pts[0], pts[1], pts[3], pts[2]);
+          const vpB = lineIntersection(pts[1], pts[2], pts[0], pts[3]);
+          if (vpA) {
+            const d = Math.sqrt((vpA.x - cx) ** 2 + (vpA.y - cy) ** 2);
+            if (d < minVPDist) { approx.delete(); continue; }
+          }
+          if (vpB) {
+            const d = Math.sqrt((vpB.x - cx) ** 2 + (vpB.y - cy) ** 2);
+            if (d < minVPDist) { approx.delete(); continue; }
+          }
+
+          quads.push({ vertices: pts, centroid: { x: cx, y: cy }, area, confidence: 1 });
+        }
+        approx.delete();
+      }
+      contours.delete();
+      return quads;
+    }
+
+    /**
+     * Run multi-threshold Canny, find quads per layer, deduplicate by centroid proximity.
+     */
+    function findQuadsMultiThreshold(gray) {
+      const blurred = new cv.Mat();
+      cv.GaussianBlur(gray, blurred, new cv.Size(3, 3), 0);
+
+      const stack = multiThresholdCanny(blurred, DEFAULT_CANNY_THRESHOLDS);
+      blurred.delete();
+
+      const W = gray.cols, H = gray.rows;
+      const diag = Math.sqrt(W * W + H * H);
+      const mergeThresh = 0.01 * diag;
+
+      // Collect quads from each layer, tagged with layer index
+      const perLayer = [];
+      const allQuads = [];
+      for (let li = 0; li < stack.layers.length; li++) {
+        const layerQuads = findQuadsInEdges(stack.layers[li], W, H);
+        perLayer.push(layerQuads);
+        for (const q of layerQuads) allQuads.push({ ...q, layer: li });
+      }
+      deleteCannyStack(stack);
+
+      console.log('[quadGrid] per-layer quad counts:', JSON.stringify(perLayer.map(l => l.length)));
+
+      // Deduplicate by centroid proximity
+      const merged = [];
+      for (const q of allQuads) {
+        let found = false;
+        for (const m of merged) {
+          const dx = q.centroid.x - m.centroid.x;
+          const dy = q.centroid.y - m.centroid.y;
+          if (Math.sqrt(dx * dx + dy * dy) < mergeThresh) {
+            m.confidence++;
+            found = true;
+            break;
+          }
+        }
+        if (!found) merged.push({ ...q });
+      }
+
+      console.log(`[quadGrid] ${allQuads.length} raw → ${merged.length} merged quads`);
+      return { raw: allQuads, merged };
+    }
+
+    /**
+     * Line intersection via cross products. Returns null if nearly parallel.
+     */
+    function lineIntersection(p1, p2, p3, p4) {
+      const d1x = p2.x - p1.x, d1y = p2.y - p1.y;
+      const d2x = p4.x - p3.x, d2y = p4.y - p3.y;
+      const denom = d1x * d2y - d1y * d2x;
+      if (Math.abs(denom) < 1e-6) return null;
+      const t = ((p3.x - p1.x) * d2y - (p3.y - p1.y) * d2x) / denom;
+      return { x: p1.x + t * d1x, y: p1.y + t * d1y };
+    }
+
+    /**
+     * For each quad, compute VP estimates from opposite edge pairs.
+     * VP_H: intersection of (TL,TR) and (BL,BR) — horizontal lines
+     * VP_V: intersection of (TL,BL) and (TR,BR) — vertical lines
+     */
+    function extractVPEstimates(quads) {
+      const vpA = [], vpB = [];
+      for (let i = 0; i < quads.length; i++) {
+        const q = quads[i];
+        const v = q.vertices; // CW contour order: v[0]→v[1]→v[2]→v[3]
+
+        // Opposite edge pairs from contour order:
+        //   Family A: edges (v0,v1) & (v3,v2) — opposite sides
+        //   Family B: edges (v1,v2) & (v0,v3) — the other opposite sides
+        const lenA1 = Math.sqrt((v[1].x - v[0].x) ** 2 + (v[1].y - v[0].y) ** 2);
+        const lenA2 = Math.sqrt((v[2].x - v[3].x) ** 2 + (v[2].y - v[3].y) ** 2);
+        const lenB1 = Math.sqrt((v[2].x - v[1].x) ** 2 + (v[2].y - v[1].y) ** 2);
+        const lenB2 = Math.sqrt((v[3].x - v[0].x) ** 2 + (v[3].y - v[0].y) ** 2);
+
+        const aVP = lineIntersection(v[0], v[1], v[3], v[2]);
+        if (aVP) {
+          vpA.push({ point: aVP, weight: q.confidence * (lenA1 + lenA2) / 2, quadIdx: i });
+        }
+
+        const bVP = lineIntersection(v[1], v[2], v[0], v[3]);
+        if (bVP) {
+          vpB.push({ point: bVP, weight: q.confidence * (lenB1 + lenB2) / 2, quadIdx: i });
+        }
+      }
+
+      // Label families H/V by average edge angle:
+      // compute mean absolute angle for each family's first edge
+      const meanAngle = (estimates, quads) => {
+        if (!estimates.length) return 0;
+        let sum = 0;
+        for (const e of estimates) {
+          const v = quads[e.quadIdx].vertices;
+          // Use the edge direction that generated this VP family
+          const dx = v[1].x - v[0].x, dy = v[1].y - v[0].y;
+          sum += Math.abs(Math.atan2(dy, dx));
+        }
+        return sum / estimates.length;
+      };
+      const angleA = meanAngle(vpA, quads);
+      const angleB = meanAngle(vpB, quads);
+
+      // More horizontal edges (smaller abs angle from horizontal) → vpH
+      const [vpH, vpV] = angleA < angleB ? [vpA, vpB] : [vpB, vpA];
+      return { vpH, vpV };
+    }
+
+    /**
+     * Solve a 3×3 homography mapping src points to dst points.
+     * Supports exactly 4 points (direct solve) or more (least-squares via
+     * normal equations: A^T A x = A^T b).
+     * Returns the 3×3 matrix as a flat 9-element array (row-major), or null on failure.
+     */
+    function solveHomography(src, dst) {
+      const N = src.length;
+      if (N < 4) return null;
+
+      // Build 2N×8 matrix A and 2N vector b (setting h8 = 1):
+      //   [x, y, 1, 0, 0, 0, -x*X, -y*X] · [h0..h7] = [X]
+      //   [0, 0, 0, x, y, 1, -x*Y, -y*Y] · [h0..h7] = [Y]
+      const rows = [];
+      const rhs = [];
+      for (let i = 0; i < N; i++) {
+        const { x, y } = src[i];
+        const { x: X, y: Y } = dst[i];
+        rows.push([x, y, 1, 0, 0, 0, -x * X, -y * X]);
+        rhs.push(X);
+        rows.push([0, 0, 0, x, y, 1, -x * Y, -y * Y]);
+        rhs.push(Y);
+      }
+
+      const n = 8;
+      const m = rows.length;
+
+      if (m === n) {
+        // Exact solve: Gaussian elimination with partial pivoting
+        const M = rows.map((row, i) => [...row, rhs[i]]);
+        for (let col = 0; col < n; col++) {
+          let maxRow = col, maxVal = Math.abs(M[col][col]);
+          for (let row = col + 1; row < n; row++) {
+            if (Math.abs(M[row][col]) > maxVal) { maxVal = Math.abs(M[row][col]); maxRow = row; }
+          }
+          if (maxVal < 1e-12) return null;
+          [M[col], M[maxRow]] = [M[maxRow], M[col]];
+          for (let row = col + 1; row < n; row++) {
+            const f = M[row][col] / M[col][col];
+            for (let j = col; j <= n; j++) M[row][j] -= f * M[col][j];
+          }
+        }
+        const h = new Array(n);
+        for (let i = n - 1; i >= 0; i--) {
+          h[i] = M[i][n];
+          for (let j = i + 1; j < n; j++) h[i] -= M[i][j] * h[j];
+          h[i] /= M[i][i];
+        }
+        return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
+      }
+
+      // Overdetermined: solve via normal equations A^T A x = A^T b
+      // Compute A^T A (n×n) and A^T b (n)
+      const AtA = Array.from({ length: n }, () => new Float64Array(n));
+      const Atb = new Float64Array(n);
+      for (let k = 0; k < m; k++) {
+        const r = rows[k];
+        const bk = rhs[k];
+        for (let i = 0; i < n; i++) {
+          Atb[i] += r[i] * bk;
+          for (let j = i; j < n; j++) {
+            AtA[i][j] += r[i] * r[j];
+          }
+        }
+      }
+      // Symmetrize
+      for (let i = 0; i < n; i++)
+        for (let j = 0; j < i; j++)
+          AtA[i][j] = AtA[j][i];
+
+      // Solve n×n system with Gaussian elimination
+      const M = AtA.map((row, i) => [...row, Atb[i]]);
+      for (let col = 0; col < n; col++) {
+        let maxRow = col, maxVal = Math.abs(M[col][col]);
+        for (let row = col + 1; row < n; row++) {
+          if (Math.abs(M[row][col]) > maxVal) { maxVal = Math.abs(M[row][col]); maxRow = row; }
+        }
+        if (maxVal < 1e-12) return null;
+        [M[col], M[maxRow]] = [M[maxRow], M[col]];
+        for (let row = col + 1; row < n; row++) {
+          const f = M[row][col] / M[col][col];
+          for (let j = col; j <= n; j++) M[row][j] -= f * M[col][j];
+        }
+      }
+      const h = new Array(n);
+      for (let i = n - 1; i >= 0; i--) {
+        h[i] = M[i][n];
+        for (let j = i + 1; j < n; j++) h[i] -= M[i][j] * h[j];
+        h[i] /= M[i][i];
+      }
+      return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
+    }
+
+    /**
+     * Invert a 3×3 homography matrix (flat 9-element row-major).
+     * Uses the adjugate formula for 3×3 matrix inversion.
+     */
+    function invertHomography3x3(H) {
+      const [a,b,c, d,e,f, g,h,i] = H;
+      const det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g);
+      if (Math.abs(det) < 1e-12) return null;
+      const inv = [
+        (e*i - f*h) / det, (c*h - b*i) / det, (b*f - c*e) / det,
+        (f*g - d*i) / det, (a*i - c*g) / det, (c*d - a*f) / det,
+        (d*h - e*g) / det, (b*g - a*h) / det, (a*e - b*d) / det,
+      ];
+      return inv;
+    }
+
+    /**
+     * Apply a 3×3 homography (flat 9-element row-major) to a point.
+     */
+    function applyHomography(H, p) {
+      const w = H[6] * p.x + H[7] * p.y + H[8];
+      if (Math.abs(w) < 1e-12) return null;
+      return {
+        x: (H[0] * p.x + H[1] * p.y + H[2]) / w,
+        y: (H[3] * p.x + H[4] * p.y + H[5]) / w,
+      };
+    }
+
+    /**
+     * Score how well a quad's corners land on integer grid coordinates
+     * under a homography. Returns the max fractional distance from any
+     * corner to its nearest integer grid point (lower = better fit).
+     * Returns Infinity if any projection fails.
+     */
+    function scoreQuadAgainstHomography(H, quad) {
+      let maxFrac = 0;
+      for (const pt of quad.vertices) {
+        const g = applyHomography(H, pt);
+        if (!g) return Infinity;
+        const fx = Math.abs(g.x - Math.round(g.x));
+        const fy = Math.abs(g.y - Math.round(g.y));
+        maxFrac = Math.max(maxFrac, fx, fy);
+      }
+      return maxFrac;
+    }
+
+    /**
+     * RANSAC homography consensus: find the largest set of quads consistent
+     * with a single grid homography.
+     *
+     * Each seed quad defines a homography (its 4 corners → unit square).
+     * A candidate quad is an inlier if all its corners map to within `gridTol`
+     * of integer grid coordinates under that homography.
+     *
+     * Returns { inlierIndices: number[], seedIdx: number, homography: number[] }.
+     */
+    function ransacGridConsensus(quads, gridTol = 0.3) {
+      let bestInliers = [];
+      let bestSeed = 0;
+      let bestH = null;
+
+      // Prefer high-confidence quads as seeds
+      const seedCandidates = [];
+      for (let i = 0; i < quads.length; i++) {
+        if (quads[i].confidence >= 3) seedCandidates.push(i);
+      }
+      if (seedCandidates.length < 3) {
+        for (let i = 0; i < quads.length; i++) seedCandidates.push(i);
+      }
+
+      // Unit square destinations (CW: TL, TR, BR, BL — but our contour
+      // order is just CW, so map v[0]→(0,0), v[1]→(1,0), v[2]→(1,1), v[3]→(0,1))
+      const unitDst = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }];
+
+      for (const si of seedCandidates) {
+        const H = solveHomography(quads[si].vertices, unitDst);
+        if (!H) continue;
+
+        const inliers = [];
+        for (let i = 0; i < quads.length; i++) {
+          if (scoreQuadAgainstHomography(H, quads[i]) < gridTol) {
+            inliers.push(i);
+          }
+        }
+
+        if (inliers.length > bestInliers.length) {
+          bestInliers = inliers;
+          bestSeed = si;
+          bestH = H;
+        }
+      }
+
+      // Log score distribution for winning seed
+      if (bestH) {
+        const scores = quads.map((q, i) => ({
+          i, score: scoreQuadAgainstHomography(bestH, q), conf: q.confidence,
+        }));
+        scores.sort((a, b) => a.score - b.score);
+        const inlierScores = scores.filter(s => s.score < gridTol);
+        const outlierScores = scores.filter(s => s.score >= gridTol);
+        console.log(`[quadGrid] RANSAC grid: seed=${bestSeed} conf=${quads[bestSeed]?.confidence} ` +
+          `inliers=${bestInliers.length}/${quads.length} tol=${gridTol}`);
+        console.log(`[quadGrid] inlier scores: ` +
+          `min=${inlierScores[0]?.score.toFixed(3)} ` +
+          `median=${inlierScores[Math.floor(inlierScores.length / 2)]?.score.toFixed(3)} ` +
+          `max=${inlierScores[inlierScores.length - 1]?.score.toFixed(3)}`);
+        if (outlierScores.length > 0) {
+          console.log(`[quadGrid] outlier scores (first 10): ` +
+            outlierScores.slice(0, 10).map(s => `q${s.i}:${s.score.toFixed(3)}(c${s.conf})`).join(' '));
+        }
+      } else {
+        console.log(`[quadGrid] RANSAC grid: no valid homography found`);
+      }
+
+      return { inlierIndices: bestInliers, seedIdx: bestSeed, homography: bestH };
+    }
+
+    /**
+     * Weighted median of an array of values with corresponding weights.
+     */
+    function weightedMedian(values, weights) {
+      const pairs = values.map((v, i) => ({ v, w: weights[i] }));
+      pairs.sort((a, b) => a.v - b.v);
+      const totalW = pairs.reduce((s, p) => s + p.w, 0);
+      let cumW = 0;
+      for (const p of pairs) {
+        cumW += p.w;
+        if (cumW >= totalW / 2) return p.v;
+      }
+      return pairs[pairs.length - 1].v;
+    }
+
+    /**
+     * IRLS robust VP estimation with weighted median init and Huber weights.
+     */
+    function estimateVPRobust(estimates) {
+      if (estimates.length === 0) return null;
+      if (estimates.length === 1) {
+        return { vp: estimates[0].point, sigma: Infinity, inlierIndices: [0] };
+      }
+
+      const xs = estimates.map(e => e.point.x);
+      const ys = estimates.map(e => e.point.y);
+      const ws = estimates.map(e => e.weight);
+
+      // Initialize with weighted median
+      let vpX = weightedMedian(xs, ws);
+      let vpY = weightedMedian(ys, ws);
+
+      // IRLS iterations
+      const ITERS = 5;
+      let sigma = Infinity;
+      for (let iter = 0; iter < ITERS; iter++) {
+        // Compute distances
+        const dists = estimates.map(e => {
+          const dx = e.point.x - vpX, dy = e.point.y - vpY;
+          return Math.sqrt(dx * dx + dy * dy);
+        });
+
+        // MAD-based sigma
+        const sortedDists = dists.slice().sort((a, b) => a - b);
+        const mad = sortedDists[Math.floor(sortedDists.length / 2)];
+        sigma = Math.max(mad * 1.4826, 1); // 1.4826 converts MAD to std dev estimate
+
+        // Huber weights: w_i * (1 if |d| <= sigma, else sigma/|d|)
+        const huber = estimates.map((e, i) => {
+          const d = dists[i];
+          const h = d <= sigma ? 1 : sigma / d;
+          return e.weight * h;
+        });
+
+        // Weighted mean update
+        let sumW = 0, sumX = 0, sumY = 0;
+        for (let i = 0; i < estimates.length; i++) {
+          sumW += huber[i];
+          sumX += huber[i] * estimates[i].point.x;
+          sumY += huber[i] * estimates[i].point.y;
+        }
+        vpX = sumX / sumW;
+        vpY = sumY / sumW;
+      }
+
+      // Final outlier rejection at 2σ
+      const inlierIndices = [];
+      for (let i = 0; i < estimates.length; i++) {
+        const dx = estimates[i].point.x - vpX, dy = estimates[i].point.y - vpY;
+        if (Math.sqrt(dx * dx + dy * dy) <= 2 * sigma) {
+          inlierIndices.push(i);
+        }
+      }
+
+      return { vp: { x: vpX, y: vpY }, sigma, inlierIndices };
+    }
+
+    /**
+     * Draw quad grid visualization on canvas-quad-grid.
+     */
+    function drawGrayBackground(canvasId, grayMat) {
+      const W = grayMat.cols, H = grayMat.rows;
+      const canvas = el(canvasId);
+      canvas.width = W;
+      canvas.height = H;
+      const ctx = canvas.getContext('2d');
+      const rgba = new cv.Mat();
+      cv.cvtColor(grayMat, rgba, cv.COLOR_GRAY2RGBA);
+      ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba.data), W, H), 0, 0);
+      rgba.delete();
+      return ctx;
+    }
+
+    /**
+     * Draw all pre-dedup quads on canvas-raw-quads, color-coded by Canny layer.
+     */
+    function drawRawQuads(grayMat, rawQuads) {
+      const ctx = drawGrayBackground('canvas-raw-quads', grayMat);
+
+      // Dim the background so quads pop
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+
+      const layerColors = ['#f44', '#f80', '#ff0', '#0f0', '#0af'];
+
+      const layerCounts = [0, 0, 0, 0, 0];
+      for (const q of rawQuads) {
+        const li = q.layer ?? 0;
+        layerCounts[li]++;
+        ctx.strokeStyle = layerColors[li] || '#fff';
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.9;
+        ctx.beginPath();
+        ctx.moveTo(q.vertices[0].x, q.vertices[0].y);
+        for (let j = 1; j < 4; j++) ctx.lineTo(q.vertices[j].x, q.vertices[j].y);
+        ctx.closePath();
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1.0;
+
+      // Legend + counts
+      ctx.font = '11px monospace';
+      const threshLabels = DEFAULT_CANNY_THRESHOLDS.map(([lo, hi]) => `${lo}/${hi}`);
+      for (let i = 0; i < layerColors.length; i++) {
+        ctx.fillStyle = layerColors[i];
+        ctx.fillText(`■ ${threshLabels[i] || '?'}: ${layerCounts[i]}`, 6, 14 + i * 14);
+      }
+      ctx.fillStyle = '#fff';
+      ctx.fillText(`total: ${rawQuads.length}`, 6, 14 + layerColors.length * 14);
+
+      updateLabel('canvas-raw-quads');
+    }
+
+    function drawQuadGrid(grayMat) {
+      const W = grayMat.cols, H = grayMat.rows;
+      const ctx = drawGrayBackground('canvas-quad-grid', grayMat);
+
+      // Detect quads
+      const { raw, merged: quads } = findQuadsMultiThreshold(grayMat);
+
+      // Draw raw quads on separate canvas
+      drawRawQuads(grayMat, raw);
+
+      if (quads.length === 0) {
+        ctx.fillStyle = '#f44';
+        ctx.font = '14px monospace';
+        ctx.fillText('No quads found', 10, 20);
+        updateLabel('canvas-quad-grid');
+        return;
+      }
+
+      // Homography RANSAC filtering
+      const ransacResult = ransacGridConsensus(quads);
+      const inlierQuads = new Set(ransacResult.inlierIndices);
+
+      // ── Refined homography from corrected quad corners ──────────────────────
+      //
+      // Flow:
+      // 1. Seed homography labels each inlier corner with a grid index
+      // 2. Measure grid step from centroid NN distances → line thickness correction
+      // 3. Expand each corner outward from its quad centroid to compensate for
+      //    Canny tracing the inner edge of grid lines (varies with perspective)
+      // 4. Fit a refined homography from ALL corrected corners (least-squares)
+      // 5. Use the refined homography for predictions and fixture comparison
+
+      let refinedH = null;    // pixel → grid (forward)
+      let refinedHinv = null; // grid → pixel (inverse)
+      let gridRange = null;
+
+      if (ransacResult.homography) {
+        const seedH = ransacResult.homography;
+
+        // Measure grid step from centroid NN distances in seed-homography space
+        const gridCentroids = [];
+        for (const i of ransacResult.inlierIndices) {
+          const g = applyHomography(seedH, quads[i].centroid);
+          if (g) gridCentroids.push(g);
+        }
+        const nnDists = [];
+        for (let i = 0; i < gridCentroids.length; i++) {
+          let minD = Infinity;
+          for (let j = 0; j < gridCentroids.length; j++) {
+            if (i === j) continue;
+            const dx = gridCentroids[i].x - gridCentroids[j].x;
+            const dy = gridCentroids[i].y - gridCentroids[j].y;
+            minD = Math.min(minD, Math.sqrt(dx * dx + dy * dy));
+          }
+          if (minD < Infinity) nnDists.push(minD);
+        }
+        nnDists.sort((a, b) => a - b);
+        const gridStep = nnDists.length > 0 ? nnDists[Math.floor(nnDists.length / 2)] : 1;
+        // Expansion factor: quad corners are inset by half a line thickness.
+        // corrected = corner + (corner - centroid) * (gridStep - 1)
+        const expand = gridStep - 1;
+        console.log(`[quadGrid] grid step: ${gridStep.toFixed(4)}, line thickness correction: ${expand.toFixed(4)}`);
+
+        // Build corrected corner → grid index correspondences
+        const srcPts = []; // corrected pixel positions
+        const dstPts = []; // grid indices
+        let minGi = Infinity, maxGi = -Infinity, minGj = Infinity, maxGj = -Infinity;
+        for (const i of ransacResult.inlierIndices) {
+          const q = quads[i];
+          const cx = q.centroid.x, cy = q.centroid.y;
+          for (const pt of q.vertices) {
+            const g = applyHomography(seedH, pt);
+            if (!g) continue;
+            // Grid index in corrected coords
+            const gi = Math.round(g.x / gridStep);
+            const gj = Math.round(g.y / gridStep);
+            // Correct pixel position: expand outward from centroid
+            const corrX = pt.x + (pt.x - cx) * expand;
+            const corrY = pt.y + (pt.y - cy) * expand;
+            srcPts.push({ x: corrX, y: corrY });
+            dstPts.push({ x: gi, y: gj });
+            minGi = Math.min(minGi, gi); maxGi = Math.max(maxGi, gi);
+            minGj = Math.min(minGj, gj); maxGj = Math.max(maxGj, gj);
+          }
+        }
+
+        // Grid range from cell indices → intersection range
+        // Centroids map to cell centers; corners at gi are intersections already
+        const minGx = minGi, maxGx = maxGi;
+        const minGy = minGj, maxGy = maxGj;
+
+        console.log(`[quadGrid] refined homography: ${srcPts.length} correspondences, ` +
+          `grid=[${minGx},${maxGx}]×[${minGy},${maxGy}] → ${maxGx - minGx + 1}×${maxGy - minGy + 1} intersections`);
+
+        // Fit refined homography (pixel → grid) from all corrected corners
+        refinedH = solveHomography(srcPts, dstPts);
+        if (refinedH) {
+          refinedHinv = invertHomography3x3(refinedH);
+          gridRange = { minGx, maxGx, minGy, maxGy };
+        }
+      }
+
+      // Compare against fixture ground truth (if loaded)
+      if (refinedH && refinedHinv && gridRange && window._fixtureIntersections) {
+        const ints = window._fixtureIntersections;
+        const boardN = window._fixtureBoardSize || 19;
+
+        // 1. Grid-space error: fixture points → grid coords, check integrality
+        const gridErrors = [];
+        for (let r = 0; r < boardN; r++) {
+          for (let c = 0; c < boardN; c++) {
+            const idx = r * boardN + c;
+            if (idx >= ints.length) continue;
+            const [px, py] = ints[idx];
+            const g = applyHomography(refinedH, { x: px, y: py });
+            if (!g) continue;
+            const fx = g.x - Math.round(g.x);
+            const fy = g.y - Math.round(g.y);
+            gridErrors.push({ r, c, gx: g.x, gy: g.y, err: Math.sqrt(fx * fx + fy * fy) });
+          }
+        }
+
+        // 2. Pixel-space error: predict positions via refined Hinv, compare to fixture
+        const pixelErrors = [];
+        if (gridErrors.length > 0) {
+          const g00 = applyHomography(refinedH, { x: ints[0][0], y: ints[0][1] });
+          const offsetX = g00 ? Math.round(g00.x) : 0;
+          const offsetY = g00 ? Math.round(g00.y) : 0;
+          // Determine axis directions: does grid x increase with fixture col?
+          // Does grid y increase with fixture row?
+          const gLast = applyHomography(refinedH, {
+            x: ints[(boardN - 1) * boardN + (boardN - 1)][0],
+            y: ints[(boardN - 1) * boardN + (boardN - 1)][1],
+          });
+          const xPerCol = gLast ? Math.sign(gLast.x - g00.x) : 1;
+          const yPerRow = gLast ? Math.sign(gLast.y - g00.y) : 1;
+          console.log(`[quadGrid] fixture offset: (${offsetX}, ${offsetY}), ` +
+            `g00 raw=(${g00?.x.toFixed(2)}, ${g00?.y.toFixed(2)}), ` +
+            `axis dirs: xPerCol=${xPerCol} yPerRow=${yPerRow}`);
+
+          for (let r = 0; r < boardN; r++) {
+            for (let c = 0; c < boardN; c++) {
+              const idx = r * boardN + c;
+              if (idx >= ints.length) continue;
+              const [actualX, actualY] = ints[idx];
+              const predicted = applyHomography(refinedHinv, {
+                x: offsetX + c * xPerCol,
+                y: offsetY + r * yPerRow,
+              });
+              if (!predicted) continue;
+              const dx = predicted.x - actualX, dy = predicted.y - actualY;
+              pixelErrors.push({ r, c, err: Math.sqrt(dx * dx + dy * dy), dx, dy });
+            }
+          }
+        }
+
+        if (gridErrors.length > 0) {
+          const sorted = gridErrors.slice().sort((a, b) => a.err - b.err);
+          const median = sorted[Math.floor(sorted.length / 2)].err;
+          const p90 = sorted[Math.floor(sorted.length * 0.9)].err;
+          const worst = sorted[sorted.length - 1];
+          console.log(`[quadGrid] fixture grid-space: ${gridErrors.length} pts, ` +
+            `median=${median.toFixed(3)}, p90=${p90.toFixed(3)}, ` +
+            `worst=(${worst.r},${worst.c}) ${worst.err.toFixed(3)} grid=(${worst.gx.toFixed(2)},${worst.gy.toFixed(2)})`);
+
+          const gxs = gridErrors.map(e => e.gx), gys = gridErrors.map(e => e.gy);
+          console.log(`[quadGrid] fixture grid range: x=[${Math.min(...gxs).toFixed(1)}, ${Math.max(...gxs).toFixed(1)}] ` +
+            `y=[${Math.min(...gys).toFixed(1)}, ${Math.max(...gys).toFixed(1)}]`);
+        }
+
+        if (pixelErrors.length > 0) {
+          const sorted = pixelErrors.slice().sort((a, b) => a.err - b.err);
+          const median = sorted[Math.floor(sorted.length / 2)].err;
+          const p90 = sorted[Math.floor(sorted.length * 0.9)].err;
+          const worst = sorted[sorted.length - 1];
+          console.log(`[quadGrid] fixture pixel-space: ${pixelErrors.length} pts, ` +
+            `median=${median.toFixed(1)}px, p90=${p90.toFixed(1)}px, ` +
+            `worst=(${worst.r},${worst.c}) ${worst.err.toFixed(1)}px`);
+        }
+      }
+
+      // VP estimation from inliers only
+      const inlierList = ransacResult.inlierIndices.map(i => quads[i]);
+      const { vpH, vpV } = extractVPEstimates(inlierList);
+      const vpHResult = estimateVPRobust(vpH);
+      const vpVResult = estimateVPRobust(vpV);
+
+      // Dim background so overlays pop
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(0, 0, W, H);
+
+      // Color by confidence: cyan=1-2, green=3, yellow=4, white=5
+      const confColor = c => c >= 5 ? '#fff' : c >= 4 ? '#ff0' : c >= 3 ? '#0f0' : '#0ff';
+
+      // Draw all quads
+      for (let i = 0; i < quads.length; i++) {
+        const q = quads[i];
+        const isInlier = inlierQuads.has(i);
+        ctx.strokeStyle = confColor(q.confidence);
+        ctx.lineWidth = isInlier ? 3 : 2;
+        ctx.globalAlpha = isInlier ? 0.9 : 0.35;
+        ctx.beginPath();
+        ctx.moveTo(q.vertices[0].x, q.vertices[0].y);
+        for (let j = 1; j < 4; j++) ctx.lineTo(q.vertices[j].x, q.vertices[j].y);
+        ctx.closePath();
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1.0;
+
+      // Draw VP markers (or arrows at edge if off-screen)
+      const drawVPMarker = (vpResult, label, color) => {
+        if (!vpResult) return;
+        const { vp } = vpResult;
+        const margin = 20;
+        const onScreen = vp.x >= -margin && vp.x <= W + margin &&
+                         vp.y >= -margin && vp.y <= H + margin;
+
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        ctx.lineWidth = 2;
+
+        if (onScreen) {
+          // Crosshair
+          const s = 10;
+          ctx.beginPath();
+          ctx.moveTo(vp.x - s, vp.y); ctx.lineTo(vp.x + s, vp.y);
+          ctx.moveTo(vp.x, vp.y - s); ctx.lineTo(vp.x, vp.y + s);
+          ctx.stroke();
+          ctx.font = '11px monospace';
+          ctx.fillText(`${label} (${Math.round(vp.x)},${Math.round(vp.y)})`, vp.x + 12, vp.y - 4);
+        } else {
+          // Arrow at canvas edge pointing toward VP
+          const cx = W / 2, cy = H / 2;
+          const dx = vp.x - cx, dy = vp.y - cy;
+          const len = Math.sqrt(dx * dx + dy * dy);
+          const nx = dx / len, ny = dy / len;
+
+          // Find intersection with canvas border
+          let t = Infinity;
+          if (nx > 0) t = Math.min(t, (W - 10 - cx) / nx);
+          else if (nx < 0) t = Math.min(t, (10 - cx) / nx);
+          if (ny > 0) t = Math.min(t, (H - 10 - cy) / ny);
+          else if (ny < 0) t = Math.min(t, (10 - cy) / ny);
+
+          const ex = cx + nx * t, ey = cy + ny * t;
+          const as = 8; // arrow size
+          ctx.beginPath();
+          ctx.moveTo(ex, ey);
+          ctx.lineTo(ex - as * nx + as * 0.5 * ny, ey - as * ny - as * 0.5 * nx);
+          ctx.moveTo(ex, ey);
+          ctx.lineTo(ex - as * nx - as * 0.5 * ny, ey - as * ny + as * 0.5 * nx);
+          ctx.stroke();
+          ctx.font = '10px monospace';
+          ctx.fillText(`${label} (${Math.round(vp.x)},${Math.round(vp.y)})`,
+            Math.max(2, Math.min(W - 120, ex + 6)),
+            Math.max(12, Math.min(H - 4, ey - 4)));
+        }
+      };
+
+      drawVPMarker(vpHResult, 'VP_H', '#f80');
+      drawVPMarker(vpVResult, 'VP_V', '#80f');
+
+      // Scale marker sizes to be visible at display resolution
+      const markerR = Math.max(6, Math.round(Math.min(W, H) / 150));
+
+      // Draw predicted grid intersections via refined homography
+      if (refinedHinv && gridRange) {
+        const { minGx, maxGx, minGy, maxGy } = gridRange;
+        const lw = Math.max(2, Math.round(markerR / 3));
+        ctx.strokeStyle = '#f0f';
+        ctx.lineWidth = lw;
+        ctx.globalAlpha = 0.9;
+        for (let gy = minGy; gy <= maxGy; gy++) {
+          for (let gx = minGx; gx <= maxGx; gx++) {
+            const px = applyHomography(refinedHinv, { x: gx, y: gy });
+            if (!px) continue;
+            if (px.x < 0 || px.x >= W || px.y < 0 || px.y >= H) continue;
+            ctx.beginPath();
+            ctx.moveTo(px.x - markerR, px.y); ctx.lineTo(px.x + markerR, px.y);
+            ctx.moveTo(px.x, px.y - markerR); ctx.lineTo(px.x, px.y + markerR);
+            ctx.stroke();
+          }
+        }
+        ctx.globalAlpha = 1.0;
+      }
+
+      // Draw fixture ground truth intersections (if loaded) for comparison
+      if (window._fixtureIntersections) {
+        const ints = window._fixtureIntersections;
+        ctx.strokeStyle = '#0f0';
+        ctx.lineWidth = Math.max(2, Math.round(markerR / 3));
+        ctx.globalAlpha = 0.7;
+        for (const [px, py] of ints) {
+          ctx.beginPath();
+          ctx.arc(px, py, markerR, 0, 2 * Math.PI);
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1.0;
+      }
+
+      // Stats text
+      const confDist = [0, 0, 0, 0, 0]; // indices 0-4 for conf 1-5
+      for (const q of quads) confDist[Math.min(q.confidence, 5) - 1]++;
+      const inlierCount = inlierQuads.size;
+
+      ctx.fillStyle = '#fff';
+      ctx.font = '11px monospace';
+      ctx.globalAlpha = 0.85;
+      const lines = [
+        `quads: ${quads.length} (inlier: ${inlierCount})`,
+        `conf: 1-2:${confDist[0] + confDist[1]} 3:${confDist[2]} 4:${confDist[3]} 5:${confDist[4]}`,
+      ];
+      if (vpHResult) lines.push(`VP_H: (${Math.round(vpHResult.vp.x)},${Math.round(vpHResult.vp.y)}) σ=${Math.round(vpHResult.sigma)}`);
+      if (vpVResult) lines.push(`VP_V: (${Math.round(vpVResult.vp.x)},${Math.round(vpVResult.vp.y)}) σ=${Math.round(vpVResult.sigma)}`);
+
+      for (let i = 0; i < lines.length; i++) {
+        ctx.fillText(lines[i], 6, 14 + i * 14);
+      }
+      ctx.globalAlpha = 1.0;
+
+      updateLabel('canvas-quad-grid');
+
+      console.log(`[quadGrid] VP_H:`, vpHResult ? `(${vpHResult.vp.x.toFixed(1)}, ${vpHResult.vp.y.toFixed(1)}) σ=${vpHResult.sigma.toFixed(1)} inliers=${vpHResult.inlierIndices.length}/${vpH.length}` : 'none');
+      console.log(`[quadGrid] VP_V:`, vpVResult ? `(${vpVResult.vp.x.toFixed(1)}, ${vpVResult.vp.y.toFixed(1)}) σ=${vpVResult.sigma.toFixed(1)} inliers=${vpVResult.inlierIndices.length}/${vpV.length}` : 'none');
     }
 
     // ── Grid bounds overlay on rectified canvas ─────────────────────────────
