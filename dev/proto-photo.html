@@ -1518,29 +1518,41 @@
       if (ransacResult.homography) {
         const seedH = ransacResult.homography;
 
-        // Measure grid step from centroid NN distances in seed-homography space
+        // Measure per-axis grid step from centroid NN distances in seed-homography space.
+        // Split into x-aligned and y-aligned neighbors to handle non-square cells
+        // (e.g. Japanese boards with ~22mm × 24mm cells).
         const gridCentroids = [];
         for (const i of ransacResult.inlierIndices) {
           const g = applyHomography(seedH, quads[i].centroid);
           if (g) gridCentroids.push(g);
         }
-        const nnDists = [];
+        const nnDistsX = []; // |dx| for neighbors roughly along x-axis
+        const nnDistsY = []; // |dy| for neighbors roughly along y-axis
         for (let i = 0; i < gridCentroids.length; i++) {
-          let minD = Infinity;
+          let bestDx = Infinity, bestDxAbs = Infinity;
+          let bestDy = Infinity, bestDyAbs = Infinity;
           for (let j = 0; j < gridCentroids.length; j++) {
             if (i === j) continue;
-            const dx = gridCentroids[i].x - gridCentroids[j].x;
-            const dy = gridCentroids[i].y - gridCentroids[j].y;
-            minD = Math.min(minD, Math.sqrt(dx * dx + dy * dy));
+            const dx = Math.abs(gridCentroids[i].x - gridCentroids[j].x);
+            const dy = Math.abs(gridCentroids[i].y - gridCentroids[j].y);
+            // x-aligned neighbor: |dx| > |dy|
+            if (dx > dy && dx < bestDxAbs) { bestDxAbs = dx; bestDx = dx; }
+            // y-aligned neighbor: |dy| > |dx|
+            if (dy > dx && dy < bestDyAbs) { bestDyAbs = dy; bestDy = dy; }
           }
-          if (minD < Infinity) nnDists.push(minD);
+          if (bestDx < Infinity) nnDistsX.push(bestDx);
+          if (bestDy < Infinity) nnDistsY.push(bestDy);
         }
-        nnDists.sort((a, b) => a - b);
-        const gridStep = nnDists.length > 0 ? nnDists[Math.floor(nnDists.length / 2)] : 1;
-        // Expansion factor: quad corners are inset by half a line thickness.
-        // corrected = corner + (corner - centroid) * (gridStep - 1)
-        const expand = gridStep - 1;
-        console.log(`[quadGrid] grid step: ${gridStep.toFixed(4)}, line thickness correction: ${expand.toFixed(4)}`);
+        nnDistsX.sort((a, b) => a - b);
+        nnDistsY.sort((a, b) => a - b);
+        const gridStepX = nnDistsX.length > 0 ? nnDistsX[Math.floor(nnDistsX.length / 2)] : 1;
+        const gridStepY = nnDistsY.length > 0 ? nnDistsY[Math.floor(nnDistsY.length / 2)] : 1;
+        // Expansion factor per axis: quad corners are inset by half a line thickness
+        const expandX = gridStepX - 1;
+        const expandY = gridStepY - 1;
+        console.log(`[quadGrid] grid step: x=${gridStepX.toFixed(4)} y=${gridStepY.toFixed(4)}, ` +
+          `aspect=${(gridStepY / gridStepX).toFixed(4)}, ` +
+          `line correction: x=${expandX.toFixed(4)} y=${expandY.toFixed(4)}`);
 
         // Build corrected corner → grid index correspondences
         const srcPts = []; // corrected pixel positions
@@ -1552,12 +1564,12 @@
           for (const pt of q.vertices) {
             const g = applyHomography(seedH, pt);
             if (!g) continue;
-            // Grid index in corrected coords
-            const gi = Math.round(g.x / gridStep);
-            const gj = Math.round(g.y / gridStep);
-            // Correct pixel position: expand outward from centroid
-            const corrX = pt.x + (pt.x - cx) * expand;
-            const corrY = pt.y + (pt.y - cy) * expand;
+            // Grid index: divide by per-axis step to handle non-square cells
+            const gi = Math.round(g.x / gridStepX);
+            const gj = Math.round(g.y / gridStepY);
+            // Correct pixel position: expand outward from centroid per axis
+            const corrX = pt.x + (pt.x - cx) * expandX;
+            const corrY = pt.y + (pt.y - cy) * expandY;
             srcPts.push({ x: corrX, y: corrY });
             dstPts.push({ x: gi, y: gj });
             minGi = Math.min(minGi, gi); maxGi = Math.max(maxGi, gi);
@@ -1575,10 +1587,10 @@
           for (const pt of q.vertices) {
             const g = applyHomography(seedH, pt);
             if (!g) continue;
-            const gi = Math.round(g.x / gridStep);
-            const gj = Math.round(g.y / gridStep);
-            const corrX = pt.x + (pt.x - cx) * expand;
-            const corrY = pt.y + (pt.y - cy) * expand;
+            const gi = Math.round(g.x / gridStepX);
+            const gj = Math.round(g.y / gridStepY);
+            const corrX = pt.x + (pt.x - cx) * expandX;
+            const corrY = pt.y + (pt.y - cy) * expandY;
             srcPts.push({ x: corrX, y: corrY });
             dstPts.push({ x: gi, y: gj });
             if (families.colEdges) { minGi = Math.min(minGi, gi); maxGi = Math.max(maxGi, gi); }
