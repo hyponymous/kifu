@@ -1197,6 +1197,43 @@
     }
 
     /**
+     * Score a quad's edge pairs independently against a homography.
+     *
+     * Since approxPolyDP can start a CW contour at any corner, we try
+     * all 4 rotations of the vertex sequence to find which (if any)
+     * maps to the unit-cell pattern:
+     *   r[0]→(gi, gj), r[1]→(gi+1, gj), r[2]→(gi+1, gj+1), r[3]→(gi, gj+1)
+     *
+     * For the matching rotation:
+     * - "row" edges (r[0]→r[1], r[3]→r[2]): valid if gy near integer for all 4
+     * - "col" edges (r[0]→r[3], r[1]→r[2]): valid if gx near integer for all 4
+     *
+     * Returns { rowEdges: bool, colEdges: bool }.
+     */
+    function scoreEdgePairs(H, quad, gridTol = 0.3) {
+      const gs = quad.vertices.map(pt => applyHomography(H, pt));
+      if (gs.some(g => !g)) return { rowEdges: false, colEdges: false };
+      const gis = gs.map(g => Math.round(g.x));
+      const gjs = gs.map(g => Math.round(g.y));
+
+      // Try each rotation of the 4 vertices
+      for (let r = 0; r < 4; r++) {
+        const ri = [r, (r + 1) % 4, (r + 2) % 4, (r + 3) % 4];
+        const xi = ri.map(k => gis[k]);
+        const yi = ri.map(k => gjs[k]);
+        // Check unit-cell structure: cols share gx, rows share gy, ±1 apart
+        const colOk = xi[0] === xi[3] && xi[1] === xi[2] && Math.abs(xi[1] - xi[0]) === 1;
+        const rowOk = yi[0] === yi[1] && yi[2] === yi[3] && Math.abs(yi[2] - yi[0]) === 1;
+        if (!colOk && !rowOk) continue;
+        // Found a valid rotation — check fractional tolerance per family
+        const rowEdges = rowOk && gs.every(g => Math.abs(g.y - Math.round(g.y)) < gridTol);
+        const colEdges = colOk && gs.every(g => Math.abs(g.x - Math.round(g.x)) < gridTol);
+        return { rowEdges, colEdges };
+      }
+      return { rowEdges: false, colEdges: false };
+    }
+
+    /**
      * RANSAC homography consensus: find the largest set of quads consistent
      * with a single grid homography.
      *
@@ -1419,8 +1456,26 @@
       }
 
       // Homography RANSAC filtering
-      const ransacResult = ransacGridConsensus(quads);
+      const gridTol = 0.3;
+      const ransacResult = ransacGridConsensus(quads, gridTol);
       const inlierQuads = new Set(ransacResult.inlierIndices);
+
+      // ── Partial inliers: quads where one edge pair aligns with the grid ────
+      const partialInlierIndices = [];
+      /** @type {Map<number, {rowEdges: boolean, colEdges: boolean}>} */
+      const partialInlierFamilies = new Map();
+      if (ransacResult.homography) {
+        for (let i = 0; i < quads.length; i++) {
+          if (inlierQuads.has(i)) continue;
+          const families = scoreEdgePairs(ransacResult.homography, quads[i], gridTol);
+          if (families.rowEdges || families.colEdges) {
+            partialInlierIndices.push(i);
+            partialInlierFamilies.set(i, families);
+          }
+        }
+        console.log(`[quadGrid] partial inliers (edge-pair): ${partialInlierIndices.length}`);
+      }
+      const partialInliers = new Set(partialInlierIndices);
 
       // ── Refined homography from corrected quad corners ──────────────────────
       //
@@ -1485,13 +1540,36 @@
             minGj = Math.min(minGj, gj); maxGj = Math.max(maxGj, gj);
           }
         }
+        const fullInlierCorners = srcPts.length;
+
+        // Add partial-inlier corners (all 4 corners contribute both coordinates;
+        // grid bounds only extend along the valid axis)
+        for (const i of partialInlierIndices) {
+          const q = quads[i];
+          const families = partialInlierFamilies.get(i);
+          const cx = q.centroid.x, cy = q.centroid.y;
+          for (const pt of q.vertices) {
+            const g = applyHomography(seedH, pt);
+            if (!g) continue;
+            const gi = Math.round(g.x / gridStep);
+            const gj = Math.round(g.y / gridStep);
+            const corrX = pt.x + (pt.x - cx) * expand;
+            const corrY = pt.y + (pt.y - cy) * expand;
+            srcPts.push({ x: corrX, y: corrY });
+            dstPts.push({ x: gi, y: gj });
+            if (families.colEdges) { minGi = Math.min(minGi, gi); maxGi = Math.max(maxGi, gi); }
+            if (families.rowEdges) { minGj = Math.min(minGj, gj); maxGj = Math.max(maxGj, gj); }
+          }
+        }
 
         // Grid range from cell indices → intersection range
         // Centroids map to cell centers; corners at gi are intersections already
         const minGx = minGi, maxGx = maxGi;
         const minGy = minGj, maxGy = maxGj;
 
-        console.log(`[quadGrid] refined homography: ${srcPts.length} correspondences, ` +
+        const partialCorners = srcPts.length - fullInlierCorners;
+        console.log(`[quadGrid] refined homography: ${srcPts.length} correspondences ` +
+          `(${fullInlierCorners} full + ${partialCorners} partial), ` +
           `grid=[${minGx},${maxGx}]×[${minGy},${maxGy}] → ${maxGx - minGx + 1}×${maxGy - minGy + 1} intersections`);
 
         // Fit refined homography (pixel → grid) from all corrected corners
@@ -1594,18 +1672,42 @@
       // Color by confidence: cyan=1-2, green=3, yellow=4, white=5
       const confColor = c => c >= 5 ? '#fff' : c >= 4 ? '#ff0' : c >= 3 ? '#0f0' : '#0ff';
 
-      // Draw all quads
+      // Draw all quads (full inliers bright, partial inliers orange, outliers dim)
       for (let i = 0; i < quads.length; i++) {
         const q = quads[i];
         const isInlier = inlierQuads.has(i);
-        ctx.strokeStyle = confColor(q.confidence);
-        ctx.lineWidth = isInlier ? 3 : 2;
-        ctx.globalAlpha = isInlier ? 0.9 : 0.35;
-        ctx.beginPath();
-        ctx.moveTo(q.vertices[0].x, q.vertices[0].y);
-        for (let j = 1; j < 4; j++) ctx.lineTo(q.vertices[j].x, q.vertices[j].y);
-        ctx.closePath();
-        ctx.stroke();
+        const isPartial = partialInliers.has(i);
+
+        if (isPartial) {
+          // Draw partial inliers: valid-family edges bright orange, others dim.
+          // Classify each edge by checking if endpoints share a rounded grid index.
+          const families = partialInlierFamilies.get(i);
+          const v = q.vertices;
+          const seedH = ransacResult.homography;
+          const gs = v.map(pt => applyHomography(seedH, pt));
+          ctx.lineWidth = 2.5;
+          for (let j = 0; j < 4; j++) {
+            const a = gs[j], b = gs[(j + 1) % 4];
+            const isRow = a && b && Math.round(a.y) === Math.round(b.y);
+            const isCol = a && b && Math.round(a.x) === Math.round(b.x);
+            const valid = (isRow && families.rowEdges) || (isCol && families.colEdges);
+            ctx.strokeStyle = '#f80';
+            ctx.globalAlpha = valid ? 0.8 : 0.25;
+            ctx.beginPath();
+            ctx.moveTo(v[j].x, v[j].y);
+            ctx.lineTo(v[(j + 1) % 4].x, v[(j + 1) % 4].y);
+            ctx.stroke();
+          }
+        } else {
+          ctx.strokeStyle = confColor(q.confidence);
+          ctx.lineWidth = isInlier ? 3 : 2;
+          ctx.globalAlpha = isInlier ? 0.9 : 0.35;
+          ctx.beginPath();
+          ctx.moveTo(q.vertices[0].x, q.vertices[0].y);
+          for (let j = 1; j < 4; j++) ctx.lineTo(q.vertices[j].x, q.vertices[j].y);
+          ctx.closePath();
+          ctx.stroke();
+        }
       }
       ctx.globalAlpha = 1.0;
 
