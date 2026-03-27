@@ -129,6 +129,18 @@
         <label><input type="checkbox" id="s-skipTrimEdges"> skipTrimEdges</label>
       </span>
 
+      <span class="param">
+        <label for="s-gridTol">gridTol</label>
+        <input type="range" id="s-gridTol" min="0.10" max="0.50" step="0.05">
+        <span class="val" id="s-gridTol-val"></span>
+      </span>
+
+      <span class="param">
+        <label for="s-trustMult">trustMult</label>
+        <input type="range" id="s-trustMult" min="0.10" max="1.00" step="0.05">
+        <span class="val" id="s-trustMult-val"></span>
+      </span>
+
       <button id="s-copy" style="font-size:0.72rem;padding:0.15rem 0.5rem">Copy settings</button>
       <button id="s-reset" style="font-size:0.72rem;padding:0.15rem 0.5rem">Reset</button>
     </div>
@@ -188,7 +200,7 @@
   <!-- positioned near hovered cell via JS -->
   <div id="debug-panel" style="display:none;position:fixed;background:#111;border:1px solid #333;padding:0.5rem 0.75rem;z-index:100;pointer-events:none">
     <pre id="debug-content" style="margin:0;font:11px/1.6 monospace;color:#ccc"></pre>
-    <div style="display:flex;gap:6px;margin-top:6px">
+    <div id="debug-crops-wrap" style="display:flex;gap:6px;margin-top:6px">
       <div>
         <div style="font:9px monospace;color:#555;margin-bottom:2px">crop</div>
         <canvas id="debug-crop-raw" style="display:block;border:1px solid #222"></canvas>
@@ -318,6 +330,8 @@
       ['s-rpThreshRatio', DEFS.rpThreshRatio],
       ['s-gradFloor',     DEFS.gradFloor],
       ['s-ransacThr',     DEFS.ransacThr],
+      ['s-gridTol',       0.2],
+      ['s-trustMult',     0.6],
     ];
     // Number inputs: [id, defaultValue]  (empty string = auto)
     const NUMBERS = [
@@ -434,6 +448,8 @@
         reDetect:       el('s-reDetect').checked,
         combinedGrid:   el('s-combinedGrid').checked,
         skipTrimEdges:  el('s-skipTrimEdges').checked,
+        gridTol:        parseFloat(el('s-gridTol').value),
+        trustMult:      parseFloat(el('s-trustMult').value),
       };
       if (!el('s-cannyAuto').checked) {
         opts.cannyLo = parseFloat(el('s-cannyLo').value);
@@ -580,6 +596,7 @@
     let lastGrayCache    = null;
     let lastHoveredStone = null;
     let lastDewarpedGray = null; // cloned cv.Mat for OCR
+    let lastQuadGridInfo = null; // { quads, quadMeta[], W, H } for hover
 
     // ── Process ────────────────────────────────────────────────────────────────
     el('process-btn').addEventListener('click',  () => runPipeline(false));
@@ -1267,6 +1284,15 @@
      *
      * Returns { inlierIndices: number[], seedIdx: number, homography: number[] }.
      */
+    /**
+     * Distance from a point to an axis-aligned bounding box (0 if inside).
+     */
+    function distToBBox(px, py, minX, minY, maxX, maxY) {
+      const dx = Math.max(0, minX - px, px - maxX);
+      const dy = Math.max(0, minY - py, py - maxY);
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
     function ransacGridConsensus(quads, gridTol = 0.3) {
       let bestInliers = [];
       let bestSeed = 0;
@@ -1289,9 +1315,16 @@
         const H = solveHomography(quads[si].vertices, unitDst);
         if (!H) continue;
 
+        // Trust radius: single-quad homography is only reliable nearby.
+        // Seed bbox is (0,0)-(1,1) in grid space; allow ~3 units beyond.
+        const ransacMaxDist = 3;
+
         const inliers = [];
         for (let i = 0; i < quads.length; i++) {
           if (scoreQuadAgainstHomography(H, quads[i]) < gridTol) {
+            const g = applyHomography(H, quads[i].centroid);
+            if (!g) continue;
+            if (distToBBox(g.x, g.y, 0, 0, 1, 1) > ransacMaxDist) continue;
             inliers.push(i);
           }
         }
@@ -1480,40 +1513,35 @@
       }
 
       // Homography RANSAC filtering
-      const gridTol = 0.3;
+      const gridTol = parseFloat(el('s-gridTol').value);
       const ransacResult = ransacGridConsensus(quads, gridTol);
       const inlierQuads = new Set(ransacResult.inlierIndices);
 
-      // ── Partial inliers: quads where one edge pair aligns with the grid ────
+      // Partial inliers are scored after iterative refinement (below)
       const partialInlierIndices = [];
       /** @type {Map<number, {rowEdges: boolean, colEdges: boolean}>} */
       const partialInlierFamilies = new Map();
-      if (ransacResult.homography) {
-        for (let i = 0; i < quads.length; i++) {
-          if (inlierQuads.has(i)) continue;
-          const families = scoreEdgePairs(ransacResult.homography, quads[i], gridTol);
-          if (families.rowEdges || families.colEdges) {
-            partialInlierIndices.push(i);
-            partialInlierFamilies.set(i, families);
-          }
-        }
-        console.log(`[quadGrid] partial inliers (edge-pair): ${partialInlierIndices.length}`);
-      }
-      const partialInliers = new Set(partialInlierIndices);
+      const partialInliers = new Set();
 
-      // ── Refined homography from corrected quad corners ──────────────────────
+      // ── Iterative homography refinement ─────────────────────────────────────
       //
       // Flow:
-      // 1. Seed homography labels each inlier corner with a grid index
+      // 1. Start with RANSAC seed homography + inliers
       // 2. Measure grid step from centroid NN distances → line thickness correction
-      // 3. Expand each corner outward from its quad centroid to compensate for
-      //    Canny tracing the inner edge of grid lines (varies with perspective)
-      // 4. Fit a refined homography from ALL corrected corners (least-squares)
-      // 5. Use the refined homography for predictions and fixture comparison
+      // 3. Iteratively improve the homography:
+      //    a. Pick 4 maximally-spread corrected corners from current inliers
+      //    b. Fit homography from those 4 points (well-conditioned)
+      //    c. Score all non-inlier quads; add new inliers (monotonic growth)
+      //    d. Stop when no new inliers are added
+      // 4. Final least-squares homography from ALL inlier + partial-inlier corners
+      // 5. Use for predictions and fixture comparison
 
       let refinedH = null;    // pixel → grid (forward)
       let refinedHinv = null; // grid → pixel (inverse)
       let gridRange = null;
+      let iteratedH = null;   // best homography from iterative growth (for viz)
+      /** @type {Map<number, number>|null} iteration each quad became inlier (-1=seed, 0=RANSAC, 1+=growth) */
+      let quadIterMap = null;
 
       if (ransacResult.homography) {
         const seedH = ransacResult.homography;
@@ -1554,52 +1582,214 @@
           `aspect=${(gridStepY / gridStepX).toFixed(4)}, ` +
           `line correction: x=${expandX.toFixed(4)} y=${expandY.toFixed(4)}`);
 
-        // Build corrected corner → grid index correspondences
-        const srcPts = []; // corrected pixel positions
-        const dstPts = []; // grid indices
-        let minGi = Infinity, maxGi = -Infinity, minGj = Infinity, maxGj = -Infinity;
+        // Helper: build corrected pixel position for a quad corner
+        const correctCorner = (pt, quad) => {
+          const cx = quad.centroid.x, cy = quad.centroid.y;
+          return { x: pt.x + (pt.x - cx) * expandX, y: pt.y + (pt.y - cy) * expandY };
+        };
+
+        // Helper: get grid index for a point under a homography.
+        // stepX/stepY = gridStepX/Y for the seed H (raw grid space), 1 for iterated H (index space).
+        const gridIndex = (H, pt, stepX, stepY) => {
+          const g = applyHomography(H, pt);
+          if (!g) return null;
+          return { gi: Math.round(g.x / stepX), gj: Math.round(g.y / stepY) };
+        };
+
+        // ── Iterative growth loop ──────────────────────────────────────────
+        let currentInliers = new Set(ransacResult.inlierIndices);
+        let currentH = seedH;
+        let currentStepX = gridStepX; // per-axis step for seed, 1 for iterated
+        let currentStepY = gridStepY;
+
+        // Track which iteration each quad became an inlier
+        quadIterMap = new Map();
+        quadIterMap.set(ransacResult.seedIdx, -1);
         for (const i of ransacResult.inlierIndices) {
+          if (!quadIterMap.has(i)) quadIterMap.set(i, 0);
+        }
+        const maxIter = 10;
+
+        for (let iter = 0; iter < maxIter; iter++) {
+          // Build corrected corner correspondences from current inliers
+          const srcPts = [];
+          const dstPts = [];
+          for (const i of currentInliers) {
+            const q = quads[i];
+            for (const pt of q.vertices) {
+              const idx = gridIndex(currentH, pt, currentStepX, currentStepY);
+              if (!idx) continue;
+              const corr = correctCorner(pt, q);
+              srcPts.push(corr);
+              dstPts.push({ x: idx.gi, y: idx.gj });
+            }
+          }
+
+          // Pick 4 maximally-spread points for a well-conditioned homography.
+          // Strategy: find the 4 corners of the convex hull of grid positions
+          // (min gx, max gx, min gy, max gy), breaking ties by distance from center.
+          const pick4Spread = () => {
+            if (srcPts.length <= 4) return null;
+            const cxG = dstPts.reduce((s, p) => s + p.x, 0) / dstPts.length;
+            const cyG = dstPts.reduce((s, p) => s + p.y, 0) / dstPts.length;
+
+            // For each of 4 directions, find the point farthest from center
+            const dirs = [
+              { dx: -1, dy: -1 }, // min gx, min gy
+              { dx:  1, dy: -1 }, // max gx, min gy
+              { dx:  1, dy:  1 }, // max gx, max gy
+              { dx: -1, dy:  1 }, // min gx, max gy
+            ];
+            const chosen = [];
+            const usedIndices = new Set();
+            for (const dir of dirs) {
+              let bestScore = -Infinity;
+              let bestIdx = 0;
+              for (let k = 0; k < dstPts.length; k++) {
+                if (usedIndices.has(k)) continue;
+                const score = (dstPts[k].x - cxG) * dir.dx + (dstPts[k].y - cyG) * dir.dy;
+                if (score > bestScore) { bestScore = score; bestIdx = k; }
+              }
+              chosen.push(bestIdx);
+              usedIndices.add(bestIdx);
+            }
+            return {
+              src: chosen.map(k => srcPts[k]),
+              dst: chosen.map(k => dstPts[k]),
+            };
+          };
+
+          const spread = pick4Spread();
+          if (!spread) break;
+
+          const iterH = solveHomography(spread.src, spread.dst);
+          if (!iterH) break;
+
+          // Adaptive trust radius: spread bbox + margin proportional to spread size
+          const spreadXs = spread.dst.map(p => p.x);
+          const spreadYs = spread.dst.map(p => p.y);
+          const sMinX = Math.min(...spreadXs), sMaxX = Math.max(...spreadXs);
+          const sMinY = Math.min(...spreadYs), sMaxY = Math.max(...spreadYs);
+          const spreadArea = (sMaxX - sMinX) * (sMaxY - sMinY);
+          const trustMult = parseFloat(el('s-trustMult').value);
+          const maxExtrap = Math.max(2, trustMult * Math.sqrt(spreadArea));
+
+          // Score all non-inlier quads against the new homography
+          let added = 0;
+          const newInliers = [];
+          const nearMisses = [];
+          for (let i = 0; i < quads.length; i++) {
+            if (currentInliers.has(i)) continue;
+            const score = scoreQuadAgainstHomography(iterH, quads[i]);
+            if (score < gridTol) {
+              // Check distance to spread bbox
+              const g = applyHomography(iterH, quads[i].centroid);
+              if (!g) continue;
+              const dist = distToBBox(g.x, g.y, sMinX, sMinY, sMaxX, sMaxY);
+              if (dist > maxExtrap) {
+                nearMisses.push({ i, score, dist, reason: 'far' });
+                continue;
+              }
+              currentInliers.add(i);
+              quadIterMap.set(i, iter + 1);
+              newInliers.push(i);
+              added++;
+            } else if (score < gridTol * 1.5) {
+              nearMisses.push({ i, score });
+            }
+          }
+
+          currentH = iterH;
+          currentStepX = 1; // iterated H maps to grid-index space (integer-spaced)
+          currentStepY = 1;
+
+          // Compute grid range for this iteration
+          let iterMinGi = Infinity, iterMaxGi = -Infinity;
+          let iterMinGj = Infinity, iterMaxGj = -Infinity;
+          for (const i of currentInliers) {
+            for (const pt of quads[i].vertices) {
+              const g = applyHomography(currentH, pt);
+              if (!g) continue;
+              const gi = Math.round(g.x), gj = Math.round(g.y);
+              iterMinGi = Math.min(iterMinGi, gi); iterMaxGi = Math.max(iterMaxGi, gi);
+              iterMinGj = Math.min(iterMinGj, gj); iterMaxGj = Math.max(iterMaxGj, gj);
+            }
+          }
+
+          const farFiltered = nearMisses.filter(m => m.reason === 'far');
+          const scoreNearMisses = nearMisses.filter(m => !m.reason);
+          scoreNearMisses.sort((a, b) => a.score - b.score);
+          console.log(`[quadGrid] iter ${iter}: ${currentInliers.size} inliers (+${added}), ` +
+            `grid=[${iterMinGi},${iterMaxGi}]×[${iterMinGj},${iterMaxGj}] → ` +
+            `${iterMaxGi - iterMinGi + 1}×${iterMaxGj - iterMinGj + 1}, ` +
+            `spread=${spread.dst.map(p => `(${p.x},${p.y})`).join(' ')} ` +
+            `trust=${maxExtrap.toFixed(1)}`);
+          if (newInliers.length > 0) {
+            console.log(`[quadGrid]   added: ${newInliers.map(i => `q${i}(c${quads[i].confidence})`).join(' ')}`);
+          }
+          if (farFiltered.length > 0) {
+            console.log(`[quadGrid]   deferred (too far): ${farFiltered.map(m => `q${m.i}:d=${m.dist.toFixed(1)}`).join(' ')}`);
+          }
+          if (scoreNearMisses.length > 0) {
+            console.log(`[quadGrid]   near-misses: ${scoreNearMisses.slice(0, 8).map(m => `q${m.i}:${m.score.toFixed(3)}(c${quads[m.i].confidence})`).join(' ')}`);
+          }
+          if (added === 0) break;
+        }
+
+        // Update inlier sets and expose iterated homography for visualization
+        iteratedH = currentH;
+        inlierQuads.clear();
+        for (const i of currentInliers) inlierQuads.add(i);
+
+        // ── Final refined homography from all corners ──────────────────────
+        const srcPts = [];
+        const dstPts = [];
+        let minGi = Infinity, maxGi = -Infinity, minGj = Infinity, maxGj = -Infinity;
+        for (const i of currentInliers) {
           const q = quads[i];
-          const cx = q.centroid.x, cy = q.centroid.y;
           for (const pt of q.vertices) {
-            const g = applyHomography(seedH, pt);
-            if (!g) continue;
-            // Grid index: divide by per-axis step to handle non-square cells
-            const gi = Math.round(g.x / gridStepX);
-            const gj = Math.round(g.y / gridStepY);
-            // Correct pixel position: expand outward from centroid per axis
-            const corrX = pt.x + (pt.x - cx) * expandX;
-            const corrY = pt.y + (pt.y - cy) * expandY;
-            srcPts.push({ x: corrX, y: corrY });
-            dstPts.push({ x: gi, y: gj });
-            minGi = Math.min(minGi, gi); maxGi = Math.max(maxGi, gi);
-            minGj = Math.min(minGj, gj); maxGj = Math.max(maxGj, gj);
+            const idx = gridIndex(currentH, pt, currentStepX, currentStepY);
+            if (!idx) continue;
+            const corr = correctCorner(pt, q);
+            srcPts.push(corr);
+            dstPts.push({ x: idx.gi, y: idx.gj });
+            minGi = Math.min(minGi, idx.gi); maxGi = Math.max(maxGi, idx.gi);
+            minGj = Math.min(minGj, idx.gj); maxGj = Math.max(maxGj, idx.gj);
           }
         }
         const fullInlierCorners = srcPts.length;
 
-        // Add partial-inlier corners (all 4 corners contribute both coordinates;
-        // grid bounds only extend along the valid axis)
+        // Re-score partial inliers against the final iterated homography
+        partialInlierIndices.length = 0;
+        partialInlierFamilies.clear();
+        for (let i = 0; i < quads.length; i++) {
+          if (currentInliers.has(i)) continue;
+          const families = scoreEdgePairs(currentH, quads[i], gridTol);
+          if (families.rowEdges || families.colEdges) {
+            partialInlierIndices.push(i);
+            partialInlierFamilies.set(i, families);
+          }
+        }
+        // Update partial inlier set for visualization
+        partialInliers.clear();
+        for (const i of partialInlierIndices) partialInliers.add(i);
+        console.log(`[quadGrid] partial inliers (edge-pair): ${partialInlierIndices.length}`);
+
+        // Add partial-inlier corners
         for (const i of partialInlierIndices) {
           const q = quads[i];
           const families = partialInlierFamilies.get(i);
-          const cx = q.centroid.x, cy = q.centroid.y;
           for (const pt of q.vertices) {
-            const g = applyHomography(seedH, pt);
-            if (!g) continue;
-            const gi = Math.round(g.x / gridStepX);
-            const gj = Math.round(g.y / gridStepY);
-            const corrX = pt.x + (pt.x - cx) * expandX;
-            const corrY = pt.y + (pt.y - cy) * expandY;
-            srcPts.push({ x: corrX, y: corrY });
-            dstPts.push({ x: gi, y: gj });
-            if (families.colEdges) { minGi = Math.min(minGi, gi); maxGi = Math.max(maxGi, gi); }
-            if (families.rowEdges) { minGj = Math.min(minGj, gj); maxGj = Math.max(maxGj, gj); }
+            const idx = gridIndex(currentH, pt, currentStepX, currentStepY);
+            if (!idx) continue;
+            const corr = correctCorner(pt, q);
+            srcPts.push(corr);
+            dstPts.push({ x: idx.gi, y: idx.gj });
+            if (families.colEdges) { minGi = Math.min(minGi, idx.gi); maxGi = Math.max(maxGi, idx.gi); }
+            if (families.rowEdges) { minGj = Math.min(minGj, idx.gj); maxGj = Math.max(maxGj, idx.gj); }
           }
         }
 
-        // Grid range from cell indices → intersection range
-        // Centroids map to cell centers; corners at gi are intersections already
         const minGx = minGi, maxGx = maxGi;
         const minGy = minGj, maxGy = maxGj;
 
@@ -1705,10 +1895,11 @@
       ctx.fillStyle = 'rgba(0,0,0,0.55)';
       ctx.fillRect(0, 0, W, H);
 
-      // Color by confidence: cyan=1-2, green=3, yellow=4, white=5
-      const confColor = c => c >= 5 ? '#fff' : c >= 4 ? '#ff0' : c >= 3 ? '#0f0' : '#0ff';
+      // Color by iteration: seed=magenta, RANSAC=cyan, iter1=green, iter2=yellow, ...
+      const iterColors = ['#0ff', '#0f0', '#ff0', '#f80', '#f0f', '#fff'];
+      const iterColor = iter => iter === -1 ? '#f0f' : iterColors[Math.min(iter, iterColors.length - 1)];
 
-      // Draw all quads (full inliers bright, partial inliers orange, outliers dim)
+      // Draw all quads colored by iteration / status
       for (let i = 0; i < quads.length; i++) {
         const q = quads[i];
         const isInlier = inlierQuads.has(i);
@@ -1719,8 +1910,7 @@
           // Classify each edge by checking if endpoints share a rounded grid index.
           const families = partialInlierFamilies.get(i);
           const v = q.vertices;
-          const seedH = ransacResult.homography;
-          const gs = v.map(pt => applyHomography(seedH, pt));
+          const gs = v.map(pt => applyHomography(iteratedH, pt));
           ctx.lineWidth = 2.5;
           for (let j = 0; j < 4; j++) {
             const a = gs[j], b = gs[(j + 1) % 4];
@@ -1734,10 +1924,20 @@
             ctx.lineTo(v[(j + 1) % 4].x, v[(j + 1) % 4].y);
             ctx.stroke();
           }
+        } else if (isInlier) {
+          const iter = quadIterMap.get(i) ?? 0;
+          ctx.strokeStyle = iterColor(iter);
+          ctx.lineWidth = iter === -1 ? 4 : 3;
+          ctx.globalAlpha = 0.9;
+          ctx.beginPath();
+          ctx.moveTo(q.vertices[0].x, q.vertices[0].y);
+          for (let j = 1; j < 4; j++) ctx.lineTo(q.vertices[j].x, q.vertices[j].y);
+          ctx.closePath();
+          ctx.stroke();
         } else {
-          ctx.strokeStyle = confColor(q.confidence);
-          ctx.lineWidth = isInlier ? 3 : 2;
-          ctx.globalAlpha = isInlier ? 0.9 : 0.35;
+          ctx.strokeStyle = '#888';
+          ctx.lineWidth = 2;
+          ctx.globalAlpha = 0.3;
           ctx.beginPath();
           ctx.moveTo(q.vertices[0].x, q.vertices[0].y);
           for (let j = 1; j < 4; j++) ctx.lineTo(q.vertices[j].x, q.vertices[j].y);
@@ -1838,31 +2038,154 @@
         ctx.globalAlpha = 1.0;
       }
 
-      // Stats text
-      const confDist = [0, 0, 0, 0, 0]; // indices 0-4 for conf 1-5
-      for (const q of quads) confDist[Math.min(q.confidence, 5) - 1]++;
+      // Stats + legend
       const inlierCount = inlierQuads.size;
+      const partialCount = partialInliers.size;
 
-      ctx.fillStyle = '#fff';
       ctx.font = '11px monospace';
       ctx.globalAlpha = 0.85;
+
+      // Legend: color swatches for iteration stages
+      const legendItems = [
+        { color: '#f0f', label: 'seed' },
+        { color: '#0ff', label: 'RANSAC' },
+        { color: '#0f0', label: 'iter 1' },
+        { color: '#ff0', label: 'iter 2+' },
+        { color: '#f80', label: 'partial' },
+        { color: '#888', label: 'outlier' },
+      ];
+      for (let li = 0; li < legendItems.length; li++) {
+        ctx.fillStyle = legendItems[li].color;
+        ctx.globalAlpha = legendItems[li].label === 'outlier' ? 0.4 : 0.85;
+        ctx.fillText(`■ ${legendItems[li].label}`, 6, 14 + li * 14);
+      }
+      ctx.globalAlpha = 0.85;
+
+      const statsY = 14 + legendItems.length * 14 + 6;
+      ctx.fillStyle = '#fff';
       const lines = [
-        `quads: ${quads.length} (inlier: ${inlierCount})`,
-        `conf: 1-2:${confDist[0] + confDist[1]} 3:${confDist[2]} 4:${confDist[3]} 5:${confDist[4]}`,
+        `quads: ${quads.length} (${inlierCount} inlier, ${partialCount} partial)`,
       ];
       if (vpHResult) lines.push(`VP_H: (${Math.round(vpHResult.vp.x)},${Math.round(vpHResult.vp.y)}) σ=${Math.round(vpHResult.sigma)}`);
       if (vpVResult) lines.push(`VP_V: (${Math.round(vpVResult.vp.x)},${Math.round(vpVResult.vp.y)}) σ=${Math.round(vpVResult.sigma)}`);
 
       for (let i = 0; i < lines.length; i++) {
-        ctx.fillText(lines[i], 6, 14 + i * 14);
+        ctx.fillText(lines[i], 6, statsY + i * 14);
       }
       ctx.globalAlpha = 1.0;
+
+      // Build per-quad metadata for hover inspection
+      const scoreH = iteratedH || ransacResult.homography;
+      const quadMeta = quads.map((q, i) => {
+        const status = inlierQuads.has(i) ? 'inlier'
+          : partialInliers.has(i) ? 'partial' : 'outlier';
+        const score = scoreH ? scoreQuadAgainstHomography(scoreH, q) : Infinity;
+        const families = partialInlierFamilies.get(i) || null;
+        let gridPos = null;
+        if (scoreH) {
+          const g = applyHomography(scoreH, q.centroid);
+          if (g) gridPos = { gx: g.x, gy: g.y };
+        }
+        let cornerGridPos = null;
+        if (scoreH) {
+          cornerGridPos = q.vertices.map(pt => {
+            const g = applyHomography(scoreH, pt);
+            return g ? { gx: g.x, gy: g.y } : null;
+          });
+        }
+        const iter = quadIterMap ? quadIterMap.get(i) ?? null : null;
+        return { i, status, confidence: q.confidence, score, families, gridPos, cornerGridPos, area: q.area, iter };
+      });
+      lastQuadGridInfo = { quads, quadMeta, W, H };
 
       updateLabel('canvas-quad-grid');
 
       console.log(`[quadGrid] VP_H:`, vpHResult ? `(${vpHResult.vp.x.toFixed(1)}, ${vpHResult.vp.y.toFixed(1)}) σ=${vpHResult.sigma.toFixed(1)} inliers=${vpHResult.inlierIndices.length}/${vpH.length}` : 'none');
       console.log(`[quadGrid] VP_V:`, vpVResult ? `(${vpVResult.vp.x.toFixed(1)}, ${vpVResult.vp.y.toFixed(1)}) σ=${vpVResult.sigma.toFixed(1)} inliers=${vpVResult.inlierIndices.length}/${vpV.length}` : 'none');
     }
+
+    // ── Quad grid hover/click handlers ─────────────────────────────────────
+
+    el('canvas-quad-grid').addEventListener('mousemove', e => {
+      if (!lastQuadGridInfo) return;
+      const { quads, quadMeta, W, H } = lastQuadGridInfo;
+      const canvas = el('canvas-quad-grid');
+      const rect = canvas.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const my = (e.clientY - rect.top) * (canvas.height / rect.height);
+
+      // Find closest quad by centroid distance
+      let bestIdx = -1;
+      let bestDist = Infinity;
+      for (let i = 0; i < quads.length; i++) {
+        const dx = quads[i].centroid.x - mx;
+        const dy = quads[i].centroid.y - my;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < bestDist) { bestDist = d; bestIdx = i; }
+      }
+
+      // Only show if mouse is reasonably close to a quad
+      const maxDist = Math.min(W, H) * 0.04;
+      if (bestIdx < 0 || bestDist > maxDist) {
+        el('debug-panel').style.display = 'none';
+        return;
+      }
+
+      const q = quads[bestIdx];
+      const m = quadMeta[bestIdx];
+      const fmtf = v => v.toFixed(3);
+
+      const iterLabel = m.iter === -1 ? 'seed' : m.iter === 0 ? 'RANSAC' : m.iter !== null ? `iter ${m.iter}` : '';
+      let text = `quad ${m.i}  conf=${m.confidence}  ${m.status}${iterLabel ? '  ' + iterLabel : ''}\n`;
+      text += `${'─'.repeat(34)}\n`;
+      text += `centroid: (${Math.round(q.centroid.x)}, ${Math.round(q.centroid.y)})\n`;
+      text += `area: ${Math.round(m.area)}\n`;
+      text += `score: ${m.score === Infinity ? '∞' : fmtf(m.score)}\n`;
+      if (m.gridPos) {
+        text += `grid centroid: (${fmtf(m.gridPos.gx)}, ${fmtf(m.gridPos.gy)})\n`;
+      }
+      if (m.cornerGridPos) {
+        text += `${'─'.repeat(34)}\n`;
+        text += `corners (grid space):\n`;
+        for (let j = 0; j < 4; j++) {
+          const c = m.cornerGridPos[j];
+          const px = q.vertices[j];
+          text += `  v${j}: (${Math.round(px.x)},${Math.round(px.y)})`;
+          if (c) text += ` → (${fmtf(c.gx)}, ${fmtf(c.gy)})`;
+          text += '\n';
+        }
+      }
+      if (m.families) {
+        text += `${'─'.repeat(34)}\n`;
+        text += `edge pairs: row=${m.families.rowEdges} col=${m.families.colEdges}\n`;
+      }
+
+      el('debug-content').textContent = text;
+      el('debug-crops-wrap').style.display = 'none';
+      const panel = el('debug-panel');
+      panel.style.display = '';
+      const pw = panel.offsetWidth, ph = panel.offsetHeight;
+      let px = e.clientX + 18, py = e.clientY + 18;
+      if (px + pw > window.innerWidth) px = e.clientX - pw - 10;
+      if (py + ph > window.innerHeight) py = e.clientY - ph - 10;
+      panel.style.left = px + 'px';
+      panel.style.top = py + 'px';
+    });
+
+    el('canvas-quad-grid').addEventListener('mouseleave', () => {
+      el('debug-panel').style.display = 'none';
+    });
+
+    el('canvas-quad-grid').addEventListener('click', e => {
+      const text = el('debug-content').textContent;
+      if (!text) return;
+      navigator.clipboard.writeText(text).then(() => {
+        const p = el('debug-panel');
+        const prev = p.style.outline;
+        p.style.outline = '1px solid #7d7';
+        setTimeout(() => { p.style.outline = prev; }, 600);
+      });
+    });
 
     // ── Grid bounds overlay on rectified canvas ─────────────────────────────
     function drawGridBounds(bounds) {
@@ -2217,6 +2540,7 @@
         `  W body=${fmt(wCent)}`;
 
       // Crops
+      el('debug-crops-wrap').style.display = '';
       const DISP = 96;
       const hw   = Math.round(step * 0.7);
       const src  = el('canvas-dewarped');
