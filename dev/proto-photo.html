@@ -1147,7 +1147,6 @@
       const candidates = [];
       const contourDebug = [];     // debug info for accepted candidates
       const rejectedDebug = [];    // debug info for rejected contours
-      const fitLog = [];           // per-contour log for threshold tuning
 
       for (let i = 0; i < contours.size(); i++) {
         const cnt = contours.get(i);
@@ -1244,19 +1243,7 @@
         }
         const fitRms = Math.sqrt(sumSqDist / fitPts.length);
 
-        // Build log entry for this contour (before rejection filters)
-        const logEntry = {
-          cx: Math.round(rr.center.x), cy: Math.round(rr.center.y),
-          a: +a.toFixed(1), b: +b.toFixed(1), ang: +angle.toFixed(1),
-          ecc: +eccentricity.toFixed(2), avgR: +avgR.toFixed(1),
-          meander: +meanderRatio.toFixed(2), fitRms: +fitRms.toFixed(2),
-          nArcs: arcs.length, arcPts: fitPts.length, contourPts: allPts.length,
-          reject: '',
-        };
-
         if (eccentricity < 0.4) {
-          logEntry.reject = 'eccentricity';
-          fitLog.push(logEntry);
           rejectedDebug.push({
             allPts, smoothMask, arcLabels, arcs,
             rejectReason: `eccentricity ${eccentricity.toFixed(2)} < 0.4`, ellipse: { center: rr.center, axes: { a, b }, angle, meanderRatio, fitRms },
@@ -1265,8 +1252,6 @@
         }
 
         if (avgR < minR * 0.7 || avgR > maxR * 1.3) {
-          logEntry.reject = 'radius';
-          fitLog.push(logEntry);
           rejectedDebug.push({
             allPts, smoothMask, arcLabels, arcs,
             rejectReason: `radius ${avgR.toFixed(1)} outside [${(minR*0.7).toFixed(1)}, ${(maxR*1.3).toFixed(1)}]`,
@@ -1276,8 +1261,6 @@
         }
 
         if (fitRms > fitRmsMax) {
-          logEntry.reject = 'fitRms';
-          fitLog.push(logEntry);
           rejectedDebug.push({
             allPts, smoothMask, arcLabels, arcs,
             rejectReason: `fitRms ${fitRms.toFixed(2)} > ${fitRmsMax}`,
@@ -1288,8 +1271,6 @@
 
         const fitPtsPct = fitPts.length / allPts.length;
         if (fitPtsPct < 0.15) {
-          logEntry.reject = 'fitPts%';
-          fitLog.push(logEntry);
           rejectedDebug.push({
             allPts, smoothMask, arcLabels, arcs,
             rejectReason: `fit pts ${(fitPtsPct * 100).toFixed(0)}% < 15%`,
@@ -1297,8 +1278,6 @@
           });
           continue;
         }
-
-        fitLog.push(logEntry);
 
         const candidate = {
           center: { x: rr.center.x, y: rr.center.y },
@@ -1420,7 +1399,6 @@
       }
 
       console.log(`[ellipse] ${candidates.length} pre-dedup → ${preOutlier} deduped → ${merged.length} after outlier rejection, ${rejectedDebug.length} total rejected`);
-      for (const entry of fitLog) console.log('[ellipse-fit] ' + JSON.stringify(entry));
       return { ellipses: merged, contourDebug: mergedDebug, rejectedDebug };
     }
 
