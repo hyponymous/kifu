@@ -141,6 +141,28 @@
         <span class="val" id="s-trustMult-val"></span>
       </span>
 
+      <span class="param">
+        <label><input type="checkbox" id="s-useEllipses" checked> useEllipses</label>
+      </span>
+
+      <span class="param">
+        <label for="s-ellipseTol">ellipseTol</label>
+        <input type="range" id="s-ellipseTol" min="0.15" max="0.50" step="0.05">
+        <span class="val" id="s-ellipseTol-val"></span>
+      </span>
+
+      <span class="param">
+        <label for="s-fitRmsMax">fitRmsMax</label>
+        <input type="range" id="s-fitRmsMax" min="1" max="10" step="0.5">
+        <span class="val" id="s-fitRmsMax-val"></span>
+      </span>
+
+      <span class="param">
+        <label for="s-minArcLen">minArcLen</label>
+        <input type="range" id="s-minArcLen" min="5" max="40" step="1">
+        <span class="val" id="s-minArcLen-val"></span>
+      </span>
+
       <button id="s-copy" style="font-size:0.72rem;padding:0.15rem 0.5rem">Copy settings</button>
       <button id="s-reset" style="font-size:0.72rem;padding:0.15rem 0.5rem">Reset</button>
     </div>
@@ -156,8 +178,8 @@
       <canvas id="canvas-edges"></canvas>
     </div>
     <div class="stage">
-      <div class="stage-label">raw quads</div>
-      <canvas id="canvas-raw-quads"></canvas>
+      <div class="stage-label">raw features</div>
+      <canvas id="canvas-raw-features"></canvas>
     </div>
     <div class="stage">
       <div class="stage-label">quad grid</div>
@@ -212,6 +234,12 @@
     </div>
   </div>
 
+  <!-- contour detail panel for raw features hover -->
+  <div id="contour-panel" style="display:none;position:fixed;background:#111;border:1px solid #333;padding:0.5rem 0.75rem;z-index:100;pointer-events:none">
+    <canvas id="contour-detail" style="display:block;border:1px solid #222"></canvas>
+    <pre id="contour-info" style="margin:4px 0 0;font:11px/1.5 monospace;color:#ccc"></pre>
+  </div>
+
   <div id="timing-wrap" style="display:none;margin-top:0.75rem">
     <canvas id="timing-canvas" style="display:block"></canvas>
   </div>
@@ -259,7 +287,7 @@
       nearestIndex, buildIntersections,
       extractStonePatches,
       generateSGF,
-      multiThresholdCanny, deleteCannyStack, DEFAULT_CANNY_THRESHOLDS,
+      multiThresholdCanny, deleteCannyStack, thresholdCannyStack, DEFAULT_CANNY_THRESHOLDS,
     } from '../photo-pipeline';
     import { runPipeline as sharedRunPipeline } from '../run-pipeline';
     import { activeDefaults } from '../pipeline-defaults';
@@ -332,6 +360,9 @@
       ['s-ransacThr',     DEFS.ransacThr],
       ['s-gridTol',       0.2],
       ['s-trustMult',     0.6],
+      ['s-ellipseTol',    0.3],
+      ['s-fitRmsMax',     5],
+      ['s-minArcLen',     10],
     ];
     // Number inputs: [id, defaultValue]  (empty string = auto)
     const NUMBERS = [
@@ -350,6 +381,7 @@
       ['s-reDetect',     DEFS.reDetect],
       ['s-combinedGrid', DEFS.combinedGrid],
       ['s-skipTrimEdges',DEFS.skipTrimEdges],
+      ['s-useEllipses',  true],
     ];
 
     function loadSettings() {
@@ -990,6 +1022,513 @@
     }
 
     /**
+     * Extract all smooth arcs from a dense contour (CHAIN_APPROX_NONE).
+     * Returns { arcs, allPts, smoothMask, arcLabels } where:
+     *   arcs: array of point arrays, one per smooth run ≥ minArcLen
+     *   allPts: all contour points
+     *   smoothMask: 0/1 per point (curvature gate)
+     *   arcLabels: per-point arc index (0-based) or -1 if not in any arc
+     */
+    function extractSmoothArcs(cnt, minArcLen = 10) {
+      const n = cnt.rows;
+      if (n < 20) return null;
+
+      const allPts = [];
+      for (let i = 0; i < n; i++) {
+        allPts.push({ x: cnt.data32S[i * 2], y: cnt.data32S[i * 2 + 1] });
+      }
+
+      // Per-point curvature using a window of ±w points
+      // Positive = convex (bending inward for CW contour), negative = concave
+      const w = 5;
+      const curvatures = new Float32Array(n);
+      const smoothMask = new Uint8Array(n);
+      for (let i = 0; i < n; i++) {
+        const prev = allPts[(i - w + n) % n];
+        const curr = allPts[i];
+        const next = allPts[(i + w) % n];
+        const v1x = curr.x - prev.x, v1y = curr.y - prev.y;
+        const v2x = next.x - curr.x, v2y = next.y - curr.y;
+        const cross = v1x * v2y - v1y * v2x;
+        const dot = v1x * v2x + v1y * v2y;
+        curvatures[i] = Math.atan2(cross, dot);
+        smoothMask[i] = curvatures[i] > -0.12 ? 1 : 0;
+      }
+
+      // Find all contiguous smooth runs (handling wrap-around)
+      // Walk 2n to detect runs that wrap, but cap each run at n
+      const runs = []; // { start, len }
+      let runStart = -1, runLen = 0;
+      for (let i = 0; i < 2 * n; i++) {
+        if (smoothMask[i % n]) {
+          if (runLen === 0) runStart = i;
+          runLen++;
+        } else {
+          if (runLen >= minArcLen && runLen <= n) {
+            runs.push({ start: runStart % n, len: Math.min(runLen, n) });
+          }
+          runLen = 0;
+        }
+      }
+      // Final run
+      if (runLen >= minArcLen && runLen <= n) {
+        runs.push({ start: runStart % n, len: Math.min(runLen, n) });
+      }
+
+      // Deduplicate runs that overlap due to the 2n walk
+      // (a wrapping run will appear twice; keep the longer one)
+      const usedPoints = new Set();
+      const dedupRuns = [];
+      // Sort longest first so we keep the best version of wrapping runs
+      runs.sort((a, b) => b.len - a.len);
+      for (const run of runs) {
+        // Check if this run's midpoint is already covered
+        const mid = (run.start + Math.floor(run.len / 2)) % n;
+        if (usedPoints.has(mid)) continue;
+        dedupRuns.push(run);
+        for (let i = 0; i < run.len; i++) usedPoints.add((run.start + i) % n);
+      }
+
+      // Determine contour winding: signed area > 0 means CCW in screen coords
+      // (y-down), so convex-inward curvature has the opposite sign from what
+      // you'd expect in math coords. We use the sign of the majority of smooth
+      // curvatures to determine "inward."
+      let posCount = 0, negCount = 0;
+      for (let i = 0; i < n; i++) {
+        if (!smoothMask[i]) continue;
+        if (curvatures[i] > 0.02) posCount++;
+        else if (curvatures[i] < -0.02) negCount++;
+      }
+      // inwardSign: +1 if positive curvature = inward, -1 if negative = inward
+      const inwardSign = posCount >= negCount ? 1 : -1;
+
+      // Build arcs, then filter: reject arcs whose median curvature bends
+      // outward (wrong sign) or is near-zero (straight lines)
+      const arcLabels = new Int8Array(n).fill(-1);
+      const arcs = [];
+      // Sort by start position for consistent coloring
+      dedupRuns.sort((a, b) => a.start - b.start);
+      for (let ai = 0; ai < dedupRuns.length; ai++) {
+        const run = dedupRuns[ai];
+        const pts = [];
+        const arcCurvs = [];
+        for (let i = 0; i < run.len; i++) {
+          const idx = (run.start + i) % n;
+          pts.push(allPts[idx]);
+          arcCurvs.push(curvatures[idx]);
+        }
+        // Median curvature of this arc
+        arcCurvs.sort((a, b) => a - b);
+        const medCurv = arcCurvs[Math.floor(arcCurvs.length / 2)];
+        // Reject if median curvature is outward or nearly straight
+        if (medCurv * inwardSign < 0.01) continue;
+
+        for (let i = 0; i < run.len; i++) {
+          arcLabels[(run.start + i) % n] = arcs.length;
+        }
+        arcs.push(pts);
+      }
+
+      return { arcs, allPts, smoothMask: Array.from(smoothMask), arcLabels: Array.from(arcLabels) };
+    }
+
+    function findEllipsesInEdges(edges, W, H, minR, maxR, fitRmsMax = 5, minArcLen = 10) {
+      const dilated   = new cv.Mat();
+      const kernel    = cv.Mat.ones(3, 3, cv.CV_8U);
+      const contours  = new cv.MatVector();
+      const hierarchy = new cv.Mat();
+
+      cv.dilate(edges, dilated, kernel);
+      cv.findContours(dilated, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_NONE);
+      dilated.delete(); kernel.delete(); hierarchy.delete();
+
+      const minArea = Math.PI * minR * minR * 0.3;
+      const maxArea = Math.PI * maxR * maxR * 2;
+      const candidates = [];
+      const contourDebug = [];     // debug info for accepted candidates
+      const rejectedDebug = [];    // debug info for rejected contours
+      const fitLog = [];           // per-contour log for threshold tuning
+
+      for (let i = 0; i < contours.size(); i++) {
+        const cnt = contours.get(i);
+        if (cnt.rows < 15) continue;
+
+        const area = cv.contourArea(cnt);
+        if (area < minArea || area > maxArea) continue;
+
+        // Extract all smooth arcs
+        const arcResult = extractSmoothArcs(cnt, minArcLen);
+        if (!arcResult || arcResult.arcs.length === 0) {
+          // Rejected: no smooth arcs found — still store for debug hover
+          if (arcResult) {
+            rejectedDebug.push({
+              allPts: arcResult.allPts, smoothMask: arcResult.smoothMask,
+              arcLabels: arcResult.arcLabels, arcs: [],
+              rejectReason: 'no arcs', ellipse: null,
+            });
+          }
+          continue;
+        }
+        const { arcs, allPts, smoothMask, arcLabels } = arcResult;
+
+        // Combine points from all arcs for fitEllipse
+        const fitPts = [];
+        for (const arc of arcs) fitPts.push(...arc);
+
+        if (fitPts.length < 5) {
+          rejectedDebug.push({
+            allPts, smoothMask, arcLabels, arcs,
+            rejectReason: `too few pts (${fitPts.length})`, ellipse: null,
+          });
+          continue;
+        }
+
+        // Fit ellipse to combined smooth points
+        const arcData = [];
+        for (const p of fitPts) { arcData.push(p.x, p.y); }
+        const arcMat = cv.matFromArray(fitPts.length, 1, cv.CV_32SC2, arcData);
+
+        let rr;
+        try {
+          rr = cv.fitEllipse(arcMat);
+        } catch (_) {
+          arcMat.delete();
+          rejectedDebug.push({
+            allPts, smoothMask, arcLabels, arcs,
+            rejectReason: 'fitEllipse failed', ellipse: null,
+          });
+          continue;
+        }
+        arcMat.delete();
+
+        const swapped = rr.size.height > rr.size.width;
+        const a = Math.max(rr.size.width, rr.size.height) / 2;
+        const b = Math.min(rr.size.width, rr.size.height) / 2;
+        const angle = swapped ? rr.angle + 90 : rr.angle;
+        const eccentricity = a > 0 ? b / a : 0;
+        const avgR = (a + b) / 2;
+
+        // Arc meandering ratio: total arc pixel-length / fitted ellipse perimeter
+        // Real stone arcs trace the ellipse, so ratio ≈ 0.3–0.8.
+        // Convoluted woodgrain contours meander much farther → ratio >> 1.
+        const perim = Math.PI * (3 * (a + b) - Math.sqrt((3 * a + b) * (a + 3 * b)));
+        let totalArcLen = 0;
+        for (const arc of arcs) {
+          for (let k = 1; k < arc.length; k++) {
+            const dx = arc[k].x - arc[k - 1].x, dy = arc[k].y - arc[k - 1].y;
+            totalArcLen += Math.sqrt(dx * dx + dy * dy);
+          }
+        }
+        const meanderRatio = perim > 0 ? totalArcLen / perim : 0;
+
+        // Fit residual: RMS distance of arc points from the fitted ellipse.
+        // Transform each point into the ellipse's local frame, compute distance
+        // to the ellipse boundary using the radial shortcut:
+        //   r_ellipse(theta) at angle theta, vs actual radius from center.
+        const angRad = angle * Math.PI / 180;
+        const cosA = Math.cos(angRad), sinA = Math.sin(angRad);
+        let sumSqDist = 0;
+        for (const p of fitPts) {
+          // Translate to ellipse center, rotate into ellipse-aligned frame
+          const dx = p.x - rr.center.x, dy = p.y - rr.center.y;
+          const lx = dx * cosA + dy * sinA;   // along semi-axis a
+          const ly = -dx * sinA + dy * cosA;   // along semi-axis b
+          // Actual radius from center
+          const rActual = Math.sqrt(lx * lx + ly * ly);
+          // Ellipse radius at this angle: r = ab / sqrt((b*cos)^2 + (a*sin)^2)
+          const theta = Math.atan2(ly, lx);
+          const ct = Math.cos(theta), st = Math.sin(theta);
+          const rEllipse = (a * b) / Math.sqrt((b * ct) ** 2 + (a * st) ** 2);
+          const diff = rActual - rEllipse;
+          sumSqDist += diff * diff;
+        }
+        const fitRms = Math.sqrt(sumSqDist / fitPts.length);
+
+        // Build log entry for this contour (before rejection filters)
+        const logEntry = {
+          cx: Math.round(rr.center.x), cy: Math.round(rr.center.y),
+          a: +a.toFixed(1), b: +b.toFixed(1), ang: +angle.toFixed(1),
+          ecc: +eccentricity.toFixed(2), avgR: +avgR.toFixed(1),
+          meander: +meanderRatio.toFixed(2), fitRms: +fitRms.toFixed(2),
+          nArcs: arcs.length, arcPts: fitPts.length, contourPts: allPts.length,
+          reject: '',
+        };
+
+        if (eccentricity < 0.4) {
+          logEntry.reject = 'eccentricity';
+          fitLog.push(logEntry);
+          rejectedDebug.push({
+            allPts, smoothMask, arcLabels, arcs,
+            rejectReason: `eccentricity ${eccentricity.toFixed(2)} < 0.4`, ellipse: { center: rr.center, axes: { a, b }, angle, meanderRatio, fitRms },
+          });
+          continue;
+        }
+
+        if (avgR < minR * 0.7 || avgR > maxR * 1.3) {
+          logEntry.reject = 'radius';
+          fitLog.push(logEntry);
+          rejectedDebug.push({
+            allPts, smoothMask, arcLabels, arcs,
+            rejectReason: `radius ${avgR.toFixed(1)} outside [${(minR*0.7).toFixed(1)}, ${(maxR*1.3).toFixed(1)}]`,
+            ellipse: { center: rr.center, axes: { a, b }, angle, meanderRatio, fitRms },
+          });
+          continue;
+        }
+
+        if (fitRms > fitRmsMax) {
+          logEntry.reject = 'fitRms';
+          fitLog.push(logEntry);
+          rejectedDebug.push({
+            allPts, smoothMask, arcLabels, arcs,
+            rejectReason: `fitRms ${fitRms.toFixed(2)} > ${fitRmsMax}`,
+            ellipse: { center: rr.center, axes: { a, b }, angle, meanderRatio, fitRms },
+          });
+          continue;
+        }
+
+        const fitPtsPct = fitPts.length / allPts.length;
+        if (fitPtsPct < 0.15) {
+          logEntry.reject = 'fitPts%';
+          fitLog.push(logEntry);
+          rejectedDebug.push({
+            allPts, smoothMask, arcLabels, arcs,
+            rejectReason: `fit pts ${(fitPtsPct * 100).toFixed(0)}% < 15%`,
+            ellipse: { center: rr.center, axes: { a, b }, angle, meanderRatio, fitRms },
+          });
+          continue;
+        }
+
+        fitLog.push(logEntry);
+
+        const candidate = {
+          center: { x: rr.center.x, y: rr.center.y },
+          axes: { a, b },
+          angle,
+          area,
+          eccentricity,
+          meanderRatio,
+          fitRms,
+        };
+        candidates.push(candidate);
+        contourDebug.push({
+          allPts, smoothMask, arcLabels, arcs,
+          rejectReason: null, ellipse: candidate,
+        });
+      }
+      contours.delete();
+
+      // Deduplicate by center proximity
+      const mergeThresh = minR * 0.5;
+      const merged = [];
+      const mergedDebug = [];
+      for (let ci = 0; ci < candidates.length; ci++) {
+        const c = candidates[ci];
+        let dup = false;
+        for (const m of merged) {
+          const dx = c.center.x - m.center.x;
+          const dy = c.center.y - m.center.y;
+          if (Math.sqrt(dx * dx + dy * dy) < mergeThresh) { dup = true; break; }
+        }
+        if (!dup) {
+          merged.push(c);
+          mergedDebug.push(contourDebug[ci]);
+        }
+      }
+
+      // ── Outlier rejection: size, eccentricity, orientation ──────────────
+      // Size (major axis `a`): fit robust linear spatial model a = c0 + c1*x + c2*y
+      // via RANSAC, reject outliers beyond tolerance.
+      // Eccentricity: global median ± generous MAD band.
+      // Orientation: only when median eccentricity > 0.6; reject large deviations
+      // from circular median, weighted by eccentricity.
+
+      const preOutlier = merged.length;
+      if (merged.length >= 6) {
+        // --- Size: RANSAC linear model on major axis ---
+        const sizeInlierMask = ransacLinearModel(
+          merged.map(e => [e.center.x, e.center.y, e.axes.a]),
+          0.25,  // fractional tolerance: 25% of predicted value
+          100,   // iterations
+        );
+
+        // --- Eccentricity: global median ± k*MAD ---
+        const eccs = merged.map(e => e.eccentricity);
+        eccs.sort((a, b) => a - b);
+        const eccMedian = eccs[Math.floor(eccs.length / 2)];
+        const eccMADs = eccs.map(v => Math.abs(v - eccMedian));
+        eccMADs.sort((a, b) => a - b);
+        const eccMAD = eccMADs[Math.floor(eccMADs.length / 2)];
+        const eccLo = eccMedian - 4 * Math.max(eccMAD, 0.05);
+        const eccHi = eccMedian + 4 * Math.max(eccMAD, 0.05);
+
+        // --- Orientation: circular median, gated by eccentricity ---
+        let angleTol = Infinity;  // disabled by default
+        let angleMedian = 0;
+        if (eccMedian < 0.6) {
+          // Weighted circular mean direction (weight = 1 - eccentricity, i.e. more elongated = more weight)
+          // Angles have 180° ambiguity, so double them before averaging
+          let sinSum = 0, cosSum = 0;
+          for (const e of merged) {
+            const w = 1 - e.eccentricity;  // lower ecc ratio = more elongated = more weight
+            const rad2 = e.angle * 2 * Math.PI / 180;
+            sinSum += w * Math.sin(rad2);
+            cosSum += w * Math.cos(rad2);
+          }
+          angleMedian = Math.atan2(sinSum, cosSum) * 180 / Math.PI / 2;  // back to 0-180 range
+          angleTol = 30;
+        }
+
+        // Apply all three filters
+        const kept = [];
+        const keptDebug = [];
+        for (let i = 0; i < merged.length; i++) {
+          const e = merged[i];
+          if (!sizeInlierMask[i]) {
+            rejectedDebug.push({
+              ...mergedDebug[i],
+              rejectReason: `size outlier (a=${e.axes.a.toFixed(1)})`,
+              ellipse: e,
+            });
+            continue;
+          }
+          if (e.eccentricity < eccLo || e.eccentricity > eccHi) {
+            rejectedDebug.push({
+              ...mergedDebug[i],
+              rejectReason: `eccentricity outlier ${e.eccentricity.toFixed(2)} outside [${eccLo.toFixed(2)}, ${eccHi.toFixed(2)}]`,
+              ellipse: e,
+            });
+            continue;
+          }
+          if (angleTol < Infinity) {
+            // Angular difference with 180° ambiguity
+            let adiff = Math.abs(e.angle - angleMedian) % 180;
+            if (adiff > 90) adiff = 180 - adiff;
+            if (adiff > angleTol) {
+              rejectedDebug.push({
+                ...mergedDebug[i],
+                rejectReason: `orientation outlier ${e.angle.toFixed(1)}° vs median ${angleMedian.toFixed(1)}° (diff=${adiff.toFixed(1)}°)`,
+                ellipse: e,
+              });
+              continue;
+            }
+          }
+          kept.push(e);
+          keptDebug.push(mergedDebug[i]);
+        }
+        merged.length = 0; merged.push(...kept);
+        mergedDebug.length = 0; mergedDebug.push(...keptDebug);
+      }
+
+      console.log(`[ellipse] ${candidates.length} pre-dedup → ${preOutlier} deduped → ${merged.length} after outlier rejection, ${rejectedDebug.length} total rejected`);
+      for (const entry of fitLog) console.log('[ellipse-fit] ' + JSON.stringify(entry));
+      return { ellipses: merged, contourDebug: mergedDebug, rejectedDebug };
+    }
+
+    /**
+     * RANSAC linear model: z = c0 + c1*x + c2*y
+     * Input: array of [x, y, z] triples.
+     * Returns boolean array: true = inlier.
+     * fracTol: fractional tolerance (|predicted - actual| / predicted < fracTol).
+     */
+    function ransacLinearModel(data, fracTol, maxIter) {
+      const n = data.length;
+      if (n < 3) return new Array(n).fill(true);
+
+      const solveLinear3 = (pts) => {
+        const [x0, y0, z0] = pts[0], [x1, y1, z1] = pts[1], [x2, y2, z2] = pts[2];
+        const D = (x1 * y2 - x2 * y1) - x0 * (y2 - y1) + y0 * (x2 - x1);
+        if (Math.abs(D) < 1e-10) return null;
+        return [
+          (z0 * (x1 * y2 - x2 * y1) - x0 * (z1 * y2 - z2 * y1) + y0 * (z1 * x2 - z2 * x1)) / D,
+          ((z1 * y2 - z2 * y1) - z0 * (y2 - y1) + y0 * (z2 - z1)) / D,
+          ((x1 * z2 - x2 * z1) - z0 * (x2 - x1) + x0 * (z2 - z1)) / D,
+        ];
+      };
+
+      const predict = (coeffs, x, y) => coeffs[0] + coeffs[1] * x + coeffs[2] * y;
+
+      let bestInliers = [];
+      let bestCount = 0;
+
+      for (let iter = 0; iter < maxIter; iter++) {
+        const i0 = Math.floor(Math.random() * n);
+        let i1 = i0, i2 = i0;
+        while (i1 === i0) i1 = Math.floor(Math.random() * n);
+        while (i2 === i0 || i2 === i1) i2 = Math.floor(Math.random() * n);
+
+        const coeffs = solveLinear3([data[i0], data[i1], data[i2]]);
+        if (!coeffs) continue;
+
+        const inliers = [];
+        for (let i = 0; i < n; i++) {
+          const pred = predict(coeffs, data[i][0], data[i][1]);
+          if (pred > 0 && Math.abs(data[i][2] - pred) / pred < fracTol) {
+            inliers.push(i);
+          }
+        }
+
+        if (inliers.length > bestCount) {
+          bestCount = inliers.length;
+          bestInliers = inliers;
+        }
+      }
+
+      // Refit on best inliers via least-squares, then use MAD-based tolerance
+      if (bestInliers.length >= 3) {
+        let sx = 0, sy = 0, sz = 0, sxx = 0, sxy = 0, syy = 0, sxz = 0, syz = 0;
+        const m = bestInliers.length;
+        for (const i of bestInliers) {
+          const [x, y, z] = data[i];
+          sx += x; sy += y; sz += z;
+          sxx += x * x; sxy += x * y; syy += y * y;
+          sxz += x * z; syz += y * z;
+        }
+        const A = [[m, sx, sy], [sx, sxx, sxy], [sy, sxy, syy]];
+        const bv = [sz, sxz, syz];
+        const det3 = (M) => M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1])
+                          - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0])
+                          + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]);
+        const Dfit = det3(A);
+        if (Math.abs(Dfit) > 1e-10) {
+          const rep = (col) => A.map((row, ri) => row.map((v, ci) => ci === col ? bv[ri] : v));
+          const coeffs = [det3(rep(0)) / Dfit, det3(rep(1)) / Dfit, det3(rep(2)) / Dfit];
+
+          // Compute residuals on inliers, then MAD
+          const residuals = bestInliers.map(i => {
+            const pred = predict(coeffs, data[i][0], data[i][1]);
+            return Math.abs(data[i][2] - pred);
+          });
+          residuals.sort((a, b) => a - b);
+          const mad = residuals[Math.floor(residuals.length / 2)];
+          // Threshold: 3 * MAD (≈ 2.2σ for normal distribution), with a floor
+          const threshold = Math.max(3 * mad, 1.5);
+
+          const result = new Array(n).fill(false);
+          for (let i = 0; i < n; i++) {
+            const pred = predict(coeffs, data[i][0], data[i][1]);
+            if (pred > 0 && Math.abs(data[i][2] - pred) < threshold) {
+              result[i] = true;
+            }
+          }
+          return result;
+        }
+      }
+
+      // Fallback: accept all
+      return new Array(n).fill(true);
+    }
+
+    /**
+     * Score how well an ellipse center lands on an integer grid coordinate
+     * under a homography. Returns max(|gx - round(gx)|, |gy - round(gy)|).
+     */
+    function scoreEllipseCenter(H, center) {
+      const g = applyHomography(H, center);
+      if (!g) return Infinity;
+      return Math.max(Math.abs(g.x - Math.round(g.x)), Math.abs(g.y - Math.round(g.y)));
+    }
+
+    /**
      * Run multi-threshold Canny, find quads per layer, deduplicate by centroid proximity.
      */
     function findQuadsMultiThreshold(gray) {
@@ -1011,6 +1550,8 @@
         perLayer.push(layerQuads);
         for (const q of layerQuads) allQuads.push({ ...q, layer: li });
       }
+      // Threshold support map at >= 2 for ellipse detection before deleting stack
+      const ellipseEdges = thresholdCannyStack(stack, 2);
       deleteCannyStack(stack);
 
       console.log('[quadGrid] per-layer quad counts:', JSON.stringify(perLayer.map(l => l.length)));
@@ -1032,7 +1573,7 @@
       }
 
       console.log(`[quadGrid] ${allQuads.length} raw → ${merged.length} merged quads`);
-      return { raw: allQuads, merged };
+      return { raw: allQuads, merged, ellipseEdges };
     }
 
     /**
@@ -1454,15 +1995,20 @@
       return ctx;
     }
 
-    /**
-     * Draw all pre-dedup quads on canvas-raw-quads, color-coded by Canny layer.
-     */
-    function drawRawQuads(grayMat, rawQuads) {
-      const ctx = drawGrayBackground('canvas-raw-quads', grayMat);
+    // Arc colors for hover visualization (distinct per arc segment)
+    const ARC_COLORS = ['#ff0', '#0f0', '#f0f', '#0af', '#fa0', '#f08', '#8f0', '#08f'];
 
-      // Dim the background so quads pop
+    /**
+     * Draw quads + ellipses on canvas-raw-features, with hover to inspect
+     * individual contours (accepted and rejected).
+     */
+    function drawRawFeatures(grayMat, rawQuads, ellipses, contourDebug, rejectedDebug) {
+      const canvas = el('canvas-raw-features');
+      const ctx = drawGrayBackground('canvas-raw-features', grayMat);
+
+      // Dim the background so features pop
       ctx.fillStyle = 'rgba(0,0,0,0.55)';
-      ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       const layerColors = ['#f44', '#f80', '#ff0', '#0f0', '#0af'];
 
@@ -1479,6 +2025,34 @@
         ctx.closePath();
         ctx.stroke();
       }
+
+      // Draw detected ellipses (accepted)
+      ctx.strokeStyle = '#0ff';
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.85;
+      for (const ell of ellipses) {
+        ctx.save();
+        ctx.translate(ell.center.x, ell.center.y);
+        ctx.rotate(ell.angle * Math.PI / 180);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, ell.axes.a, ell.axes.b, 0, 0, 2 * Math.PI);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // Draw rejected contour centroids as dim red dots
+      ctx.fillStyle = '#f44';
+      ctx.globalAlpha = 0.3;
+      for (const rej of rejectedDebug) {
+        // Compute centroid
+        let cx = 0, cy = 0;
+        for (const p of rej.allPts) { cx += p.x; cy += p.y; }
+        cx /= rej.allPts.length; cy /= rej.allPts.length;
+        rej._centroid = { x: cx, y: cy };
+        ctx.beginPath();
+        ctx.arc(cx, cy, 3, 0, 2 * Math.PI);
+        ctx.fill();
+      }
       ctx.globalAlpha = 1.0;
 
       // Legend + counts
@@ -1489,9 +2063,216 @@
         ctx.fillText(`■ ${threshLabels[i] || '?'}: ${layerCounts[i]}`, 6, 14 + i * 14);
       }
       ctx.fillStyle = '#fff';
-      ctx.fillText(`total: ${rawQuads.length}`, 6, 14 + layerColors.length * 14);
+      ctx.fillText(`total quads: ${rawQuads.length}`, 6, 14 + layerColors.length * 14);
+      ctx.fillStyle = '#0ff';
+      ctx.fillText(`■ ellipses: ${ellipses.length}`, 6, 14 + (layerColors.length + 1) * 14);
+      ctx.fillStyle = '#f44';
+      ctx.globalAlpha = 0.5;
+      ctx.fillText(`■ rejected: ${rejectedDebug.length}`, 6, 14 + (layerColors.length + 2) * 14);
+      ctx.globalAlpha = 1.0;
 
-      updateLabel('canvas-raw-quads');
+      updateLabel('canvas-raw-features');
+
+      // ── Hover interaction: blown-up contour detail panel ──────────────────
+      const baseImage = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+      // Build unified hover target list: accepted ellipses + rejected contours
+      const hoverTargets = [];
+      for (let i = 0; i < ellipses.length; i++) {
+        const ell = ellipses[i];
+        hoverTargets.push({
+          cx: ell.center.x, cy: ell.center.y,
+          matchR: ell.axes.a + ell.axes.b,
+          dbg: contourDebug[i], accepted: true,
+        });
+      }
+      for (const rej of rejectedDebug) {
+        // Estimate a match radius from contour bbox
+        let bxMin = Infinity, bxMax = -Infinity, byMin = Infinity, byMax = -Infinity;
+        for (const p of rej.allPts) {
+          bxMin = Math.min(bxMin, p.x); bxMax = Math.max(bxMax, p.x);
+          byMin = Math.min(byMin, p.y); byMax = Math.max(byMax, p.y);
+        }
+        const matchR = Math.max(bxMax - bxMin, byMax - byMin) * 0.6;
+        hoverTargets.push({
+          cx: rej._centroid.x, cy: rej._centroid.y,
+          matchR, dbg: rej, accepted: false,
+        });
+      }
+
+      const getCanvasCoords = (e) => {
+        const rect = canvas.getBoundingClientRect();
+        return {
+          x: (e.clientX - rect.left) * (canvas.width / rect.width),
+          y: (e.clientY - rect.top) * (canvas.height / rect.height),
+        };
+      };
+
+      if (canvas._hoverHandler) canvas.removeEventListener('mousemove', canvas._hoverHandler);
+      if (canvas._leaveHandler) canvas.removeEventListener('mouseleave', canvas._leaveHandler);
+
+      canvas._leaveHandler = () => {
+        ctx.putImageData(baseImage, 0, 0);
+        el('contour-panel').style.display = 'none';
+      };
+      canvas.addEventListener('mouseleave', canvas._leaveHandler);
+
+      canvas._hoverHandler = (e) => {
+        const { x: mx, y: my } = getCanvasCoords(e);
+
+        // Find nearest hover target to mouse
+        let bestIdx = -1, bestDist = Infinity;
+        for (let i = 0; i < hoverTargets.length; i++) {
+          const t = hoverTargets[i];
+          const dx = mx - t.cx, dy = my - t.cy;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d < t.matchR && d < bestDist) {
+            bestDist = d;
+            bestIdx = i;
+          }
+        }
+
+        ctx.putImageData(baseImage, 0, 0);
+
+        if (bestIdx < 0) {
+          el('contour-panel').style.display = 'none';
+          return;
+        }
+
+        const target = hoverTargets[bestIdx];
+        const dbg = target.dbg;
+        const ell = dbg.ellipse;  // may be null for some rejects
+
+        // Highlight on main canvas: draw contour points colored by arc
+        for (let i = 0; i < dbg.allPts.length; i++) {
+          const p = dbg.allPts[i];
+          const arcIdx = dbg.arcLabels[i];
+          if (arcIdx >= 0) {
+            ctx.fillStyle = ARC_COLORS[arcIdx % ARC_COLORS.length];
+          } else {
+            ctx.fillStyle = dbg.smoothMask[i] ? '#555' : '#f44';
+          }
+          ctx.globalAlpha = 0.9;
+          ctx.fillRect(p.x - 1, p.y - 1, 3, 3);
+        }
+        if (ell) {
+          ctx.strokeStyle = '#0ff';
+          ctx.lineWidth = 2.5;
+          ctx.globalAlpha = 1.0;
+          ctx.save();
+          ctx.translate(ell.center.x, ell.center.y);
+          ctx.rotate(ell.angle * Math.PI / 180);
+          ctx.beginPath();
+          ctx.ellipse(0, 0, ell.axes.a, ell.axes.b, 0, 0, 2 * Math.PI);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        // ── Blown-up detail panel ──────────────────────────────────────────
+        const DETAIL_SIZE = 280;
+        const detailCanvas = el('contour-detail');
+        detailCanvas.width = DETAIL_SIZE;
+        detailCanvas.height = DETAIL_SIZE;
+        detailCanvas.style.width = DETAIL_SIZE + 'px';
+        detailCanvas.style.height = DETAIL_SIZE + 'px';
+        const dctx = detailCanvas.getContext('2d');
+
+        // Bounding box of contour points + ellipse if present
+        let bxMin = Infinity, bxMax = -Infinity, byMin = Infinity, byMax = -Infinity;
+        for (const p of dbg.allPts) {
+          bxMin = Math.min(bxMin, p.x); bxMax = Math.max(bxMax, p.x);
+          byMin = Math.min(byMin, p.y); byMax = Math.max(byMax, p.y);
+        }
+        if (ell) {
+          bxMin = Math.min(bxMin, ell.center.x - ell.axes.a);
+          bxMax = Math.max(bxMax, ell.center.x + ell.axes.a);
+          byMin = Math.min(byMin, ell.center.y - ell.axes.b);
+          byMax = Math.max(byMax, ell.center.y + ell.axes.b);
+        }
+        const pad = Math.max(bxMax - bxMin, byMax - byMin) * 0.15;
+        bxMin -= pad; bxMax += pad; byMin -= pad; byMax += pad;
+
+        const bw = bxMax - bxMin, bh = byMax - byMin;
+        const scale = DETAIL_SIZE / Math.max(bw, bh);
+        const offX = (DETAIL_SIZE - bw * scale) / 2;
+        const offY = (DETAIL_SIZE - bh * scale) / 2;
+        const tx = (px) => (px - bxMin) * scale + offX;
+        const ty = (py) => (py - byMin) * scale + offY;
+
+        // Background: cropped source image
+        dctx.fillStyle = '#111';
+        dctx.fillRect(0, 0, DETAIL_SIZE, DETAIL_SIZE);
+        dctx.drawImage(canvas,
+          bxMin, byMin, bw, bh,
+          offX, offY, bw * scale, bh * scale);
+
+        // Draw contour points: non-arc smooth as gray, non-smooth as red,
+        // arc points colored by arc index
+        const dotR = Math.max(2, Math.round(scale * 1.2));
+        for (let i = 0; i < dbg.allPts.length; i++) {
+          const p = dbg.allPts[i];
+          const arcIdx = dbg.arcLabels[i];
+          if (arcIdx >= 0) {
+            dctx.fillStyle = ARC_COLORS[arcIdx % ARC_COLORS.length];
+          } else if (dbg.smoothMask[i]) {
+            dctx.fillStyle = 'rgba(100,100,100,0.6)';  // smooth but too short to be an arc
+          } else {
+            dctx.fillStyle = 'rgba(255,68,68,0.7)';
+          }
+          dctx.beginPath();
+          dctx.arc(tx(p.x), ty(p.y), dotR, 0, 2 * Math.PI);
+          dctx.fill();
+        }
+
+        // Draw fitted ellipse if present
+        if (ell) {
+          dctx.strokeStyle = '#0ff';
+          dctx.lineWidth = 2;
+          dctx.save();
+          dctx.translate(tx(ell.center.x), ty(ell.center.y));
+          dctx.rotate(ell.angle * Math.PI / 180);
+          dctx.beginPath();
+          dctx.ellipse(0, 0, ell.axes.a * scale, ell.axes.b * scale, 0, 0, 2 * Math.PI);
+          dctx.stroke();
+          dctx.restore();
+
+          // Center crosshair
+          dctx.strokeStyle = '#fff';
+          dctx.lineWidth = 1;
+          const cxd = tx(ell.center.x), cyd = ty(ell.center.y);
+          dctx.beginPath();
+          dctx.moveTo(cxd - 8, cyd); dctx.lineTo(cxd + 8, cyd);
+          dctx.moveTo(cxd, cyd - 8); dctx.lineTo(cxd, cyd + 8);
+          dctx.stroke();
+        }
+
+        // Info text
+        const totalSmooth = dbg.arcs.reduce((s, a) => s + a.length, 0);
+        let info = `contour: ${dbg.allPts.length} pts\n`;
+        info += `arcs: ${dbg.arcs.length}`;
+        if (dbg.arcs.length > 0) {
+          info += ` (${dbg.arcs.map((a, i) => ARC_COLORS[i % ARC_COLORS.length].slice(0,4) + ':' + a.length).join(', ')})`;
+        }
+        info += `\nfit pts: ${totalSmooth} (${(totalSmooth / dbg.allPts.length * 100).toFixed(0)}%)`;
+        if (ell) {
+          info += `\nellipse: a=${ell.axes.a.toFixed(1)} b=${ell.axes.b.toFixed(1)} ang=${ell.angle.toFixed(1)}°`;
+          if (ell.meanderRatio != null) {
+            info += `\nmeander: ${ell.meanderRatio.toFixed(2)}  fitRms: ${ell.fitRms.toFixed(2)}`;
+          }
+        }
+        if (dbg.rejectReason) {
+          info += `\nREJECTED: ${dbg.rejectReason}`;
+        }
+        el('contour-info').textContent = info;
+
+        // Position panel near cursor
+        const panel = el('contour-panel');
+        panel.style.display = '';
+        let px = e.clientX + 18, py = e.clientY + 18;
+        panel.style.left = px + 'px';
+        panel.style.top = py + 'px';
+      };
+      canvas.addEventListener('mousemove', canvas._hoverHandler);
     }
 
     function drawQuadGrid(grayMat) {
@@ -1499,15 +2280,28 @@
       const ctx = drawGrayBackground('canvas-quad-grid', grayMat);
 
       // Detect quads
-      const { raw, merged: quads } = findQuadsMultiThreshold(grayMat);
+      const { raw, merged: quads, ellipseEdges } = findQuadsMultiThreshold(grayMat);
 
-      // Draw raw quads on separate canvas
-      drawRawQuads(grayMat, raw);
+      // Rough ellipse detection for "raw features" visualization
+      // (uses rough size estimate; may be re-filtered later with precise step)
+      const roughPixelStep = Math.min(W, H) / 20;
+      const roughMinR = Math.min(roughPixelStep * 0.3, 25);
+      const roughMaxR = roughPixelStep * 0.55;
+      let ellipseResult = { ellipses: [], contourDebug: [], rejectedDebug: [] };
+      if (el('s-useEllipses').checked) {
+        const fitRmsMax = parseFloat(el('s-fitRmsMax').value);
+        const minArcLen = parseInt(el('s-minArcLen').value);
+        ellipseResult = findEllipsesInEdges(ellipseEdges, W, H, roughMinR, roughMaxR, fitRmsMax, minArcLen);
+      }
+
+      // Draw raw quads + ellipses on separate canvas (with hover for contours)
+      drawRawFeatures(grayMat, raw, ellipseResult.ellipses, ellipseResult.contourDebug, ellipseResult.rejectedDebug);
 
       if (quads.length === 0) {
         ctx.fillStyle = '#f44';
         ctx.font = '14px monospace';
         ctx.fillText('No quads found', 10, 20);
+        ellipseEdges.delete();
         updateLabel('canvas-quad-grid');
         return;
       }
@@ -1542,6 +2336,10 @@
       let iteratedH = null;   // best homography from iterative growth (for viz)
       /** @type {Map<number, number>|null} iteration each quad became inlier (-1=seed, 0=RANSAC, 1+=growth) */
       let quadIterMap = null;
+      /** @type {Array<{center: {x:number,y:number}, axes: {a:number,b:number}, angle: number}>} */
+      let ellipses = [];
+      const ellipseInliers = new Set();
+      const ellipseIterMap = new Map();
 
       if (ransacResult.homography) {
         const seedH = ransacResult.homography;
@@ -1596,6 +2394,36 @@
           return { gi: Math.round(g.x / stepX), gj: Math.round(g.y / stepY) };
         };
 
+        // ── Estimate pixel-space grid step and detect ellipses ──────────────
+        const seedHinv = invertHomography3x3(seedH);
+        let pixelGridStep = Math.min(W, H) / 20; // fallback
+        if (seedHinv) {
+          // Sample two adjacent grid points and measure pixel distance
+          const g0 = { x: 0, y: 0 };
+          const g1x = { x: gridStepX, y: 0 };
+          const g1y = { x: 0, y: gridStepY };
+          const p0 = applyHomography(seedHinv, g0);
+          const p1x = applyHomography(seedHinv, g1x);
+          const p1y = applyHomography(seedHinv, g1y);
+          if (p0 && p1x && p1y) {
+            const dxStep = Math.sqrt((p1x.x - p0.x) ** 2 + (p1x.y - p0.y) ** 2);
+            const dyStep = Math.sqrt((p1y.x - p0.x) ** 2 + (p1y.y - p0.y) ** 2);
+            pixelGridStep = (dxStep + dyStep) / 2;
+          }
+        }
+        const stoneMinR = Math.min(pixelGridStep * 0.3, 25);
+        const stoneMaxR = pixelGridStep * 0.55;
+
+        let ellipseContourDebug = [];
+        if (el('s-useEllipses').checked) {
+          const result = findEllipsesInEdges(ellipseEdges, W, H, stoneMinR, stoneMaxR, parseFloat(el('s-fitRmsMax').value), parseInt(el('s-minArcLen').value));
+          ellipses = result.ellipses;
+          ellipseContourDebug = result.contourDebug;
+        }
+        ellipseEdges.delete();
+        console.log(`[quadGrid] ellipses: ${ellipses.length} candidates (pixelStep=${pixelGridStep.toFixed(1)}, r=[${stoneMinR.toFixed(1)},${stoneMaxR.toFixed(1)}])`);
+
+
         // ── Iterative growth loop ──────────────────────────────────────────
         let currentInliers = new Set(ransacResult.inlierIndices);
         let currentH = seedH;
@@ -1623,6 +2451,13 @@
               srcPts.push(corr);
               dstPts.push({ x: idx.gi, y: idx.gj });
             }
+          }
+          // Include inlier ellipse centers
+          for (const ei of ellipseInliers) {
+            const idx = gridIndex(currentH, ellipses[ei].center, currentStepX, currentStepY);
+            if (!idx) continue;
+            srcPts.push(ellipses[ei].center);
+            dstPts.push({ x: idx.gi, y: idx.gj });
           }
 
           // Pick 4 maximally-spread points for a well-conditioned homography.
@@ -1699,6 +2534,32 @@
             }
           }
 
+          // Score ellipses against the new homography
+          const ellipseTol = parseFloat(el('s-ellipseTol').value);
+          // Build occupied grid set from current quad inlier corners to avoid double-counting
+          const occupiedGrid = new Set();
+          for (const i of currentInliers) {
+            for (const pt of quads[i].vertices) {
+              const gOcc = applyHomography(iterH, pt);
+              if (gOcc) occupiedGrid.add(`${Math.round(gOcc.x)},${Math.round(gOcc.y)}`);
+            }
+          }
+          let ellipseAdded = 0;
+          for (let ei = 0; ei < ellipses.length; ei++) {
+            if (ellipseInliers.has(ei)) continue;
+            const score = scoreEllipseCenter(iterH, ellipses[ei].center);
+            if (score >= ellipseTol) continue;
+            const g = applyHomography(iterH, ellipses[ei].center);
+            if (!g) continue;
+            const gi = Math.round(g.x), gj = Math.round(g.y);
+            if (occupiedGrid.has(`${gi},${gj}`)) continue;
+            if (distToBBox(g.x, g.y, sMinX, sMinY, sMaxX, sMaxY) > maxExtrap) continue;
+            ellipseInliers.add(ei);
+            ellipseIterMap.set(ei, iter + 1);
+            ellipseAdded++;
+            added++;
+          }
+
           currentH = iterH;
           currentStepX = 1; // iterated H maps to grid-index space (integer-spaced)
           currentStepY = 1;
@@ -1719,13 +2580,14 @@
           const farFiltered = nearMisses.filter(m => m.reason === 'far');
           const scoreNearMisses = nearMisses.filter(m => !m.reason);
           scoreNearMisses.sort((a, b) => a.score - b.score);
-          console.log(`[quadGrid] iter ${iter}: ${currentInliers.size} inliers (+${added}), ` +
+          console.log(`[quadGrid] iter ${iter}: ${currentInliers.size} quad inliers (+${newInliers.length}), ` +
+            `${ellipseInliers.size} ellipse inliers (+${ellipseAdded}), ` +
             `grid=[${iterMinGi},${iterMaxGi}]×[${iterMinGj},${iterMaxGj}] → ` +
             `${iterMaxGi - iterMinGi + 1}×${iterMaxGj - iterMinGj + 1}, ` +
             `spread=${spread.dst.map(p => `(${p.x},${p.y})`).join(' ')} ` +
             `trust=${maxExtrap.toFixed(1)}`);
           if (newInliers.length > 0) {
-            console.log(`[quadGrid]   added: ${newInliers.map(i => `q${i}(c${quads[i].confidence})`).join(' ')}`);
+            console.log(`[quadGrid]   quads added: ${newInliers.map(i => `q${i}(c${quads[i].confidence})`).join(' ')}`);
           }
           if (farFiltered.length > 0) {
             console.log(`[quadGrid]   deferred (too far): ${farFiltered.map(m => `q${m.i}:d=${m.dist.toFixed(1)}`).join(' ')}`);
@@ -1790,12 +2652,23 @@
           }
         }
 
+        // Add ellipse correspondences
+        const partialCorners = srcPts.length - fullInlierCorners;
+        for (const ei of ellipseInliers) {
+          const idx = gridIndex(currentH, ellipses[ei].center, currentStepX, currentStepY);
+          if (!idx) continue;
+          srcPts.push(ellipses[ei].center);
+          dstPts.push({ x: idx.gi, y: idx.gj });
+          minGi = Math.min(minGi, idx.gi); maxGi = Math.max(maxGi, idx.gi);
+          minGj = Math.min(minGj, idx.gj); maxGj = Math.max(maxGj, idx.gj);
+        }
+        const ellipseCorners = srcPts.length - fullInlierCorners - partialCorners;
+
         const minGx = minGi, maxGx = maxGi;
         const minGy = minGj, maxGy = maxGj;
 
-        const partialCorners = srcPts.length - fullInlierCorners;
         console.log(`[quadGrid] refined homography: ${srcPts.length} correspondences ` +
-          `(${fullInlierCorners} full + ${partialCorners} partial), ` +
+          `(${fullInlierCorners} full + ${partialCorners} partial + ${ellipseCorners} ellipse), ` +
           `grid=[${minGx},${maxGx}]×[${minGy},${maxGy}] → ${maxGx - minGx + 1}×${maxGy - minGy + 1} intersections`);
 
         // Fit refined homography (pixel → grid) from all corrected corners
@@ -1804,6 +2677,9 @@
           refinedHinv = invertHomography3x3(refinedH);
           gridRange = { minGx, maxGx, minGy, maxGy };
         }
+      } else {
+        // No homography — still need to clean up ellipseEdges
+        ellipseEdges.delete();
       }
 
       // Compare against fixture ground truth (if loaded)
@@ -1947,6 +2823,41 @@
       }
       ctx.globalAlpha = 1.0;
 
+      // Draw ellipse candidates (dim cyan outlines) and inlier markers (diamonds)
+      if (ellipses && ellipses.length > 0) {
+        // All candidate ellipses: dim cyan outlines
+        ctx.strokeStyle = '#4af';
+        ctx.lineWidth = 1.5;
+        ctx.globalAlpha = 0.25;
+        for (const ell of ellipses) {
+          ctx.save();
+          ctx.translate(ell.center.x, ell.center.y);
+          ctx.rotate(ell.angle * Math.PI / 180);
+          ctx.beginPath();
+          ctx.ellipse(0, 0, ell.axes.a, ell.axes.b, 0, 0, 2 * Math.PI);
+          ctx.stroke();
+          ctx.restore();
+        }
+        ctx.globalAlpha = 1.0;
+
+        // Inlier ellipse centers: small diamonds colored by iteration
+        const dSize = Math.max(4, Math.round(Math.min(W, H) / 200));
+        for (const ei of ellipseInliers) {
+          const iter = ellipseIterMap.get(ei) ?? 0;
+          ctx.fillStyle = iterColor(iter);
+          ctx.globalAlpha = 0.9;
+          const { x, y } = ellipses[ei].center;
+          ctx.beginPath();
+          ctx.moveTo(x, y - dSize);
+          ctx.lineTo(x + dSize, y);
+          ctx.lineTo(x, y + dSize);
+          ctx.lineTo(x - dSize, y);
+          ctx.closePath();
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1.0;
+      }
+
       // Draw VP markers (or arrows at edge if off-screen)
       const drawVPMarker = (vpResult, label, color) => {
         if (!vpResult) return;
@@ -2052,6 +2963,7 @@
         { color: '#0f0', label: 'iter 1' },
         { color: '#ff0', label: 'iter 2+' },
         { color: '#f80', label: 'partial' },
+        { color: '#4af', label: 'ellipse' },
         { color: '#888', label: 'outlier' },
       ];
       for (let li = 0; li < legendItems.length; li++) {
@@ -2063,8 +2975,11 @@
 
       const statsY = 14 + legendItems.length * 14 + 6;
       ctx.fillStyle = '#fff';
+      const ellipseCount = ellipses ? ellipses.length : 0;
+      const ellipseInlierCount = ellipseInliers ? ellipseInliers.size : 0;
       const lines = [
         `quads: ${quads.length} (${inlierCount} inlier, ${partialCount} partial)`,
+        `ellipses: ${ellipseCount} candidates, ${ellipseInlierCount} inlier`,
       ];
       if (vpHResult) lines.push(`VP_H: (${Math.round(vpHResult.vp.x)},${Math.round(vpHResult.vp.y)}) σ=${Math.round(vpHResult.sigma)}`);
       if (vpVResult) lines.push(`VP_V: (${Math.round(vpVResult.vp.x)},${Math.round(vpVResult.vp.y)}) σ=${Math.round(vpVResult.sigma)}`);

@@ -96,7 +96,10 @@ interface CvModule {
   RETR_EXTERNAL: number;
   RETR_LIST: number;
   CHAIN_APPROX_SIMPLE: number;
+  CHAIN_APPROX_NONE: number;
   boundingRect(contour: CvMat): CvRect;
+  convexHull(src: CvMat, dst: CvMat): void;
+  fitEllipse(points: CvMat): { center: { x: number; y: number }; size: { width: number; height: number }; angle: number };
 
   // Geometric transformations
   getPerspectiveTransform(src: CvMat, dst: CvMat): CvMat;
