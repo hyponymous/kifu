@@ -628,7 +628,7 @@
     let lastGrayCache    = null;
     let lastHoveredStone = null;
     let lastDewarpedGray = null; // cloned cv.Mat for OCR
-    let lastQuadGridInfo = null; // { quads, quadMeta[], W, H } for hover
+    let lastQuadGridInfo = null; // { quads, quadMeta[], ellipses, ellipseMeta[], W, H } for hover
 
     // ── Process ────────────────────────────────────────────────────────────────
     el('process-btn').addEventListener('click',  () => runPipeline(false));
@@ -1507,6 +1507,35 @@
     }
 
     /**
+     * Correct an ellipse center for stone-thickness parallax.
+     * A stone of height h ≈ 0.4 * diameter appears shifted along the minor axis
+     * direction (away from camera). The correction shifts the center back toward
+     * the true intersection.
+     *
+     * Shift magnitude: 0.8 * a * sqrt(1 - (b/a)²)  (a=semi-major, b=semi-minor)
+     * Direction: along minor axis; sign chosen by whichever gives a better
+     * grid-space score under H (closer to integer position).
+     */
+    function correctEllipseParallax(ellipse, H) {
+      const { center, axes, angle } = ellipse;
+      const a = Math.max(axes.a, axes.b);
+      const b = Math.min(axes.a, axes.b);
+      const ratio = b / a;
+      if (ratio > 0.95) return center; // nearly circular — negligible parallax
+      const shiftMag = 0.8 * a * Math.sqrt(1 - ratio * ratio);
+      // Minor axis direction (perpendicular to major axis)
+      const angleRad = angle * Math.PI / 180;
+      const mx = -Math.sin(angleRad);
+      const my = Math.cos(angleRad);
+      // Try both signs, pick the one with lower grid-space error
+      const c1 = { x: center.x + shiftMag * mx, y: center.y + shiftMag * my };
+      const c2 = { x: center.x - shiftMag * mx, y: center.y - shiftMag * my };
+      const s1 = scoreEllipseCenter(H, c1);
+      const s2 = scoreEllipseCenter(H, c2);
+      return s1 < s2 ? c1 : c2;
+    }
+
+    /**
      * Run multi-threshold Canny, find quads per layer, deduplicate by centroid proximity.
      */
     function findQuadsMultiThreshold(gray) {
@@ -2260,8 +2289,7 @@
       // Detect quads
       const { raw, merged: quads, ellipseEdges } = findQuadsMultiThreshold(grayMat);
 
-      // Rough ellipse detection for "raw features" visualization
-      // (uses rough size estimate; may be re-filtered later with precise step)
+      // Ellipse detection (single pass — outlier rejection here is authoritative)
       const roughPixelStep = Math.min(W, H) / 20;
       const roughMinR = Math.min(roughPixelStep * 0.3, 25);
       const roughMaxR = roughPixelStep * 0.55;
@@ -2271,6 +2299,7 @@
         const minArcLen = parseInt(el('s-minArcLen').value);
         ellipseResult = findEllipsesInEdges(ellipseEdges, W, H, roughMinR, roughMaxR, fitRmsMax, minArcLen);
       }
+      let ellipses = ellipseResult.ellipses;
 
       // Draw raw quads + ellipses on separate canvas (with hover for contours)
       drawRawFeatures(grayMat, raw, ellipseResult.ellipses, ellipseResult.contourDebug, ellipseResult.rejectedDebug);
@@ -2315,9 +2344,11 @@
       /** @type {Map<number, number>|null} iteration each quad became inlier (-1=seed, 0=RANSAC, 1+=growth) */
       let quadIterMap = null;
       /** @type {Array<{center: {x:number,y:number}, axes: {a:number,b:number}, angle: number}>} */
-      let ellipses = [];
+      // ellipses is declared above (single-pass detection)
       const ellipseInliers = new Set();
       const ellipseIterMap = new Map();
+      /** @type {Map<number, {gi: number, gj: number}>} last known grid cell per ellipse inlier */
+      const ellipseGridMap = new Map();
 
       if (ransacResult.homography) {
         const seedH = ransacResult.homography;
@@ -2389,17 +2420,8 @@
             pixelGridStep = (dxStep + dyStep) / 2;
           }
         }
-        const stoneMinR = Math.min(pixelGridStep * 0.3, 25);
-        const stoneMaxR = pixelGridStep * 0.55;
-
-        let ellipseContourDebug = [];
-        if (el('s-useEllipses').checked) {
-          const result = findEllipsesInEdges(ellipseEdges, W, H, stoneMinR, stoneMaxR, parseFloat(el('s-fitRmsMax').value), parseInt(el('s-minArcLen').value));
-          ellipses = result.ellipses;
-          ellipseContourDebug = result.contourDebug;
-        }
         ellipseEdges.delete();
-        console.log(`[quadGrid] ellipses: ${ellipses.length} candidates (pixelStep=${pixelGridStep.toFixed(1)}, r=[${stoneMinR.toFixed(1)},${stoneMaxR.toFixed(1)}])`);
+        console.log(`[quadGrid] ellipses: ${ellipses.length} candidates (pixelStep=${pixelGridStep.toFixed(1)})`);
 
 
         // ── Iterative growth loop ──────────────────────────────────────────
@@ -2417,6 +2439,7 @@
         const maxIter = 10;
 
         for (let iter = 0; iter < maxIter; iter++) {
+          const ellipseTol = parseFloat(el('s-ellipseTol').value);
           // Build corrected corner correspondences from current inliers
           const srcPts = [];
           const dstPts = [];
@@ -2430,62 +2453,52 @@
               dstPts.push({ x: idx.gi, y: idx.gj });
             }
           }
-          // Include inlier ellipse centers
+          // Include tier-1 ellipse inliers in the homography solve.
+          // Tier 1: score < ellipseTol * 0.5 (high confidence grid match).
+          // Tier 2: score < ellipseTol (counted as inliers but don't influence H).
+          const ellipseMoveLog = [];
+          const strictTol = ellipseTol * 0.25;
+          let tier1Count = 0, tier2Count = 0;
           for (const ei of ellipseInliers) {
-            const idx = gridIndex(currentH, ellipses[ei].center, currentStepX, currentStepY);
+            const corrected = correctEllipseParallax(ellipses[ei], currentH);
+            const idx = gridIndex(currentH, corrected, currentStepX, currentStepY);
             if (!idx) continue;
-            srcPts.push(ellipses[ei].center);
-            dstPts.push({ x: idx.gi, y: idx.gj });
+            const prev = ellipseGridMap.get(ei);
+            if (prev && (prev.gi !== idx.gi || prev.gj !== idx.gj)) {
+              ellipseMoveLog.push(`e${ei}:(${prev.gi},${prev.gj})→(${idx.gi},${idx.gj})`);
+            }
+            ellipseGridMap.set(ei, { gi: idx.gi, gj: idx.gj });
+            // Re-score under current H to decide tier (using corrected center)
+            const score = scoreEllipseCenter(currentH, corrected);
+            if (score < strictTol) {
+              srcPts.push(corrected);
+              dstPts.push({ x: idx.gi, y: idx.gj });
+              tier1Count++;
+            } else {
+              tier2Count++;
+            }
           }
 
-          // Pick 4 maximally-spread points for a well-conditioned homography.
-          // Strategy: find the 4 corners of the convex hull of grid positions
-          // (min gx, max gx, min gy, max gy), breaking ties by distance from center.
-          const pick4Spread = () => {
-            if (srcPts.length <= 4) return null;
-            const cxG = dstPts.reduce((s, p) => s + p.x, 0) / dstPts.length;
-            const cyG = dstPts.reduce((s, p) => s + p.y, 0) / dstPts.length;
-
-            // For each of 4 directions, find the point farthest from center
-            const dirs = [
-              { dx: -1, dy: -1 }, // min gx, min gy
-              { dx:  1, dy: -1 }, // max gx, min gy
-              { dx:  1, dy:  1 }, // max gx, max gy
-              { dx: -1, dy:  1 }, // min gx, max gy
-            ];
-            const chosen = [];
-            const usedIndices = new Set();
-            for (const dir of dirs) {
-              let bestScore = -Infinity;
-              let bestIdx = 0;
-              for (let k = 0; k < dstPts.length; k++) {
-                if (usedIndices.has(k)) continue;
-                const score = (dstPts[k].x - cxG) * dir.dx + (dstPts[k].y - cyG) * dir.dy;
-                if (score > bestScore) { bestScore = score; bestIdx = k; }
-              }
-              chosen.push(bestIdx);
-              usedIndices.add(bestIdx);
-            }
-            return {
-              src: chosen.map(k => srcPts[k]),
-              dst: chosen.map(k => dstPts[k]),
-            };
-          };
-
-          const spread = pick4Spread();
-          if (!spread) break;
-
-          const iterH = solveHomography(spread.src, spread.dst);
+          // Solve homography from quad corners + tier-1 ellipses (least-squares).
+          // Tier-2 ellipses are counted as inliers but don't influence the solve.
+          if (srcPts.length < 4) break;
+          const iterH = solveHomography(srcPts, dstPts);
           if (!iterH) break;
 
-          // Adaptive trust radius: spread bbox + margin proportional to spread size
-          const spreadXs = spread.dst.map(p => p.x);
-          const spreadYs = spread.dst.map(p => p.y);
-          const sMinX = Math.min(...spreadXs), sMaxX = Math.max(...spreadXs);
-          const sMinY = Math.min(...spreadYs), sMaxY = Math.max(...spreadYs);
+          // Adaptive trust radius based on the bounding box of all grid positions
+          const allGx = dstPts.map(p => p.x);
+          const allGy = dstPts.map(p => p.y);
+          const sMinX = Math.min(...allGx), sMaxX = Math.max(...allGx);
+          const sMinY = Math.min(...allGy), sMaxY = Math.max(...allGy);
           const spreadArea = (sMaxX - sMinX) * (sMaxY - sMinY);
           const trustMult = parseFloat(el('s-trustMult').value);
           const maxExtrap = Math.max(2, trustMult * Math.sqrt(spreadArea));
+
+          // Spread corners for logging
+          const spread = { dst: [
+            { x: sMinX, y: sMinY }, { x: sMaxX, y: sMinY },
+            { x: sMaxX, y: sMaxY }, { x: sMinX, y: sMaxY },
+          ] };
 
           // Score all non-inlier quads against the new homography
           let added = 0;
@@ -2513,7 +2526,6 @@
           }
 
           // Score ellipses against the new homography
-          const ellipseTol = parseFloat(el('s-ellipseTol').value);
           // Build occupied grid set from current quad inlier corners to avoid double-counting
           const occupiedGrid = new Set();
           for (const i of currentInliers) {
@@ -2522,20 +2534,25 @@
               if (gOcc) occupiedGrid.add(`${Math.round(gOcc.x)},${Math.round(gOcc.y)}`);
             }
           }
+          // Score new ellipse candidates
           let ellipseAdded = 0;
+          const ellipseAddLog = [];
           for (let ei = 0; ei < ellipses.length; ei++) {
             if (ellipseInliers.has(ei)) continue;
-            const score = scoreEllipseCenter(iterH, ellipses[ei].center);
+            const corrected = correctEllipseParallax(ellipses[ei], iterH);
+            const score = scoreEllipseCenter(iterH, corrected);
             if (score >= ellipseTol) continue;
-            const g = applyHomography(iterH, ellipses[ei].center);
+            const g = applyHomography(iterH, corrected);
             if (!g) continue;
             const gi = Math.round(g.x), gj = Math.round(g.y);
             if (occupiedGrid.has(`${gi},${gj}`)) continue;
             if (distToBBox(g.x, g.y, sMinX, sMinY, sMaxX, sMaxY) > maxExtrap) continue;
             ellipseInliers.add(ei);
             ellipseIterMap.set(ei, iter + 1);
+            ellipseGridMap.set(ei, { gi, gj });
             ellipseAdded++;
             added++;
+            ellipseAddLog.push(`e${ei}→(${gi},${gj}) s=${score.toFixed(2)} g=(${g.x.toFixed(2)},${g.y.toFixed(2)})`);
           }
 
           currentH = iterH;
@@ -2559,13 +2576,19 @@
           const scoreNearMisses = nearMisses.filter(m => !m.reason);
           scoreNearMisses.sort((a, b) => a.score - b.score);
           console.log(`[quadGrid] iter ${iter}: ${currentInliers.size} quad inliers (+${newInliers.length}), ` +
-            `${ellipseInliers.size} ellipse inliers (+${ellipseAdded}), ` +
+            `${ellipseInliers.size} ellipse inliers (+${ellipseAdded}, t1=${tier1Count} t2=${tier2Count}), ` +
             `grid=[${iterMinGi},${iterMaxGi}]×[${iterMinGj},${iterMaxGj}] → ` +
             `${iterMaxGi - iterMinGi + 1}×${iterMaxGj - iterMinGj + 1}, ` +
             `spread=${spread.dst.map(p => `(${p.x},${p.y})`).join(' ')} ` +
             `trust=${maxExtrap.toFixed(1)}`);
           if (newInliers.length > 0) {
             console.log(`[quadGrid]   quads added: ${newInliers.map(i => `q${i}(c${quads[i].confidence})`).join(' ')}`);
+          }
+          if (ellipseAddLog.length > 0) {
+            console.log(`[quadGrid]   ellipses added: ${ellipseAddLog.join(' ')}`);
+          }
+          if (ellipseMoveLog.length > 0) {
+            console.log(`[quadGrid]   ellipses moved: ${ellipseMoveLog.join(' ')}`);
           }
           if (farFiltered.length > 0) {
             console.log(`[quadGrid]   deferred (too far): ${farFiltered.map(m => `q${m.i}:d=${m.dist.toFixed(1)}`).join(' ')}`);
@@ -2633,9 +2656,10 @@
         // Add ellipse correspondences
         const partialCorners = srcPts.length - fullInlierCorners;
         for (const ei of ellipseInliers) {
-          const idx = gridIndex(currentH, ellipses[ei].center, currentStepX, currentStepY);
+          const corrected = correctEllipseParallax(ellipses[ei], currentH);
+          const idx = gridIndex(currentH, corrected, currentStepX, currentStepY);
           if (!idx) continue;
-          srcPts.push(ellipses[ei].center);
+          srcPts.push(corrected);
           dstPts.push({ x: idx.gi, y: idx.gj });
           minGi = Math.min(minGi, idx.gi); maxGi = Math.max(maxGi, idx.gi);
           minGj = Math.min(minGj, idx.gj); maxGj = Math.max(maxGj, idx.gj);
@@ -2686,17 +2710,90 @@
           const g00 = applyHomography(refinedH, { x: ints[0][0], y: ints[0][1] });
           const offsetX = g00 ? Math.round(g00.x) : 0;
           const offsetY = g00 ? Math.round(g00.y) : 0;
-          // Determine axis directions: does grid x increase with fixture col?
-          // Does grid y increase with fixture row?
-          const gLast = applyHomography(refinedH, {
-            x: ints[(boardN - 1) * boardN + (boardN - 1)][0],
-            y: ints[(boardN - 1) * boardN + (boardN - 1)][1],
-          });
-          const xPerCol = gLast ? Math.sign(gLast.x - g00.x) : 1;
-          const yPerRow = gLast ? Math.sign(gLast.y - g00.y) : 1;
+          // Determine axis mapping: fixture row/col may map to either grid x or y.
+          // Check off-diagonal points to figure out which axis is which.
+          const g10 = applyHomography(refinedH, { x: ints[1 * boardN][0], y: ints[1 * boardN][1] }); // row=1,col=0
+          const g01 = applyHomography(refinedH, { x: ints[1][0], y: ints[1][1] }); // row=0,col=1
+          // Measure how much gx and gy change when stepping one row vs one col
+          const dxPerRow = g10 && g00 ? g10.x - g00.x : 0;
+          const dxPerCol = g01 && g00 ? g01.x - g00.x : 0;
+          const dyPerRow = g10 && g00 ? g10.y - g00.y : 0;
+          const dyPerCol = g01 && g00 ? g01.y - g00.y : 0;
+          // Grid x aligns with whichever fixture axis has larger |dx|
+          let xPerRow, xPerCol, yPerRow, yPerCol;
+          if (Math.abs(dxPerRow) > Math.abs(dxPerCol)) {
+            // gx varies with row, gy varies with col
+            xPerRow = Math.sign(dxPerRow); xPerCol = 0;
+            yPerCol = Math.sign(dyPerCol); yPerRow = 0;
+          } else {
+            // gx varies with col, gy varies with row
+            xPerCol = Math.sign(dxPerCol); xPerRow = 0;
+            yPerRow = Math.sign(dyPerRow); yPerCol = 0;
+          }
           console.log(`[quadGrid] fixture offset: (${offsetX}, ${offsetY}), ` +
             `g00 raw=(${g00?.x.toFixed(2)}, ${g00?.y.toFixed(2)}), ` +
-            `axis dirs: xPerCol=${xPerCol} yPerRow=${yPerRow}`);
+            `axis dirs: xPerRow=${xPerRow} xPerCol=${xPerCol} yPerRow=${yPerRow} yPerCol=${yPerCol}`);
+
+          // Check correspondences against fixture ground truth.
+          // For each quad corner / ellipse center used in the homography,
+          // find the nearest fixture intersection and compare assigned grid cell
+          // vs true fixture grid cell.
+          const fixtureCheck = (pixelPt, assignedGi, assignedGj, label) => {
+            let bestFixDist = Infinity, bestR = -1, bestC = -1;
+            for (let r = 0; r < boardN; r++) {
+              for (let c = 0; c < boardN; c++) {
+                const fi = r * boardN + c;
+                if (fi >= ints.length) continue;
+                const dx = ints[fi][0] - pixelPt.x, dy = ints[fi][1] - pixelPt.y;
+                const d = dx * dx + dy * dy;
+                if (d < bestFixDist) { bestFixDist = d; bestR = r; bestC = c; }
+              }
+            }
+            if (bestR < 0) return null;
+            const trueGi = offsetX + bestR * xPerRow + bestC * xPerCol;
+            const trueGj = offsetY + bestR * yPerRow + bestC * yPerCol;
+            const mismatch = (assignedGi !== trueGi || assignedGj !== trueGj);
+            return { label, assignedGi, assignedGj, trueGi, trueGj, mismatch,
+              fixR: bestR, fixC: bestC, dist: Math.sqrt(bestFixDist) };
+          };
+
+          const discrepancies = [];
+          const gridCell = (pt) => {
+            const g = applyHomography(refinedH, pt);
+            if (!g) return null;
+            return { gi: Math.round(g.x), gj: Math.round(g.y) };
+          };
+          // Check quad corners
+          for (const i of inlierQuads) {
+            const q = quads[i];
+            for (let vi = 0; vi < 4; vi++) {
+              const pt = q.vertices[vi];
+              const cell = gridCell(pt);
+              if (!cell) continue;
+              const result = fixtureCheck(pt, cell.gi, cell.gj, `q${i}v${vi}`);
+              if (result && result.mismatch) discrepancies.push(result);
+            }
+          }
+          // Check ellipse centers (use parallax-corrected center for grid cell,
+          // but raw center for pixel-space nearest-fixture lookup)
+          for (const ei of ellipseInliers) {
+            const corrected = correctEllipseParallax(ellipses[ei], refinedH);
+            const cell = gridCell(corrected);
+            if (!cell) continue;
+            const result = fixtureCheck(ellipses[ei].center, cell.gi, cell.gj, `e${ei}`);
+            if (result && result.mismatch) discrepancies.push(result);
+          }
+
+          if (discrepancies.length > 0) {
+            const quadDisc = discrepancies.filter(d => d.label.startsWith('q'));
+            const ellDisc = discrepancies.filter(d => d.label.startsWith('e'));
+            console.log(`[fixture] ${discrepancies.length} grid mismatches (${quadDisc.length} quad, ${ellDisc.length} ellipse):`);
+            for (const d of discrepancies) {
+              console.log(`[fixture]   ${d.label}: assigned=(${d.assignedGi},${d.assignedGj}) true=(${d.trueGi},${d.trueGj}) fixRC=(${d.fixR},${d.fixC}) dist=${d.dist.toFixed(1)}px`);
+            }
+          } else {
+            console.log(`[fixture] all correspondences match ground truth`);
+          }
 
           for (let r = 0; r < boardN; r++) {
             for (let c = 0; c < boardN; c++) {
@@ -2704,8 +2801,8 @@
               if (idx >= ints.length) continue;
               const [actualX, actualY] = ints[idx];
               const predicted = applyHomography(refinedHinv, {
-                x: offsetX + c * xPerCol,
-                y: offsetY + r * yPerRow,
+                x: offsetX + r * xPerRow + c * xPerCol,
+                y: offsetY + r * yPerRow + c * yPerCol,
               });
               if (!predicted) continue;
               const dx = predicted.x - actualX, dy = predicted.y - actualY;
@@ -2989,7 +3086,21 @@
         const iter = quadIterMap ? quadIterMap.get(i) ?? null : null;
         return { i, status, confidence: q.confidence, score, families, gridPos, cornerGridPos, area: q.area, iter };
       });
-      lastQuadGridInfo = { quads, quadMeta, W, H };
+      // Build per-ellipse metadata for hover inspection
+      const ellipseMeta = ellipses.map((ell, ei) => {
+        const isInlier = ellipseInliers.has(ei);
+        const iter = ellipseIterMap.get(ei) ?? null;
+        const gridCell = ellipseGridMap.get(ei) || null;
+        let score = Infinity;
+        let gridPos = null;
+        if (scoreH) {
+          score = scoreEllipseCenter(scoreH, ell.center);
+          const g = applyHomography(scoreH, ell.center);
+          if (g) gridPos = { gx: g.x, gy: g.y };
+        }
+        return { ei, isInlier, iter, gridCell, score, gridPos, ell };
+      });
+      lastQuadGridInfo = { quads, quadMeta, ellipses, ellipseMeta, W, H };
 
       updateLabel('canvas-quad-grid');
 
@@ -3001,56 +3112,85 @@
 
     el('canvas-quad-grid').addEventListener('mousemove', e => {
       if (!lastQuadGridInfo) return;
-      const { quads, quadMeta, W, H } = lastQuadGridInfo;
+      const { quads, quadMeta, ellipses: ells, ellipseMeta, W, H } = lastQuadGridInfo;
       const canvas = el('canvas-quad-grid');
       const rect = canvas.getBoundingClientRect();
       const mx = (e.clientX - rect.left) * (canvas.width / rect.width);
       const my = (e.clientY - rect.top) * (canvas.height / rect.height);
 
+      const maxDist = Math.min(W, H) * 0.04;
+      const fmtf = v => v.toFixed(3);
+
       // Find closest quad by centroid distance
-      let bestIdx = -1;
-      let bestDist = Infinity;
+      let bestQuadIdx = -1, bestQuadDist = Infinity;
       for (let i = 0; i < quads.length; i++) {
-        const dx = quads[i].centroid.x - mx;
-        const dy = quads[i].centroid.y - my;
+        const dx = quads[i].centroid.x - mx, dy = quads[i].centroid.y - my;
         const d = Math.sqrt(dx * dx + dy * dy);
-        if (d < bestDist) { bestDist = d; bestIdx = i; }
+        if (d < bestQuadDist) { bestQuadDist = d; bestQuadIdx = i; }
       }
 
-      // Only show if mouse is reasonably close to a quad
-      const maxDist = Math.min(W, H) * 0.04;
-      if (bestIdx < 0 || bestDist > maxDist) {
+      // Find closest ellipse by center distance
+      let bestEllIdx = -1, bestEllDist = Infinity;
+      if (ellipseMeta) {
+        for (let i = 0; i < ellipseMeta.length; i++) {
+          const c = ellipseMeta[i].ell.center;
+          const dx = c.x - mx, dy = c.y - my;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d < bestEllDist) { bestEllDist = d; bestEllIdx = i; }
+        }
+      }
+
+      // Pick whichever is closer
+      const isQuad = bestQuadDist <= bestEllDist;
+      const dist = isQuad ? bestQuadDist : bestEllDist;
+      if (dist > maxDist) {
         el('debug-panel').style.display = 'none';
         return;
       }
 
-      const q = quads[bestIdx];
-      const m = quadMeta[bestIdx];
-      const fmtf = v => v.toFixed(3);
-
-      const iterLabel = m.iter === -1 ? 'seed' : m.iter === 0 ? 'RANSAC' : m.iter !== null ? `iter ${m.iter}` : '';
-      let text = `quad ${m.i}  conf=${m.confidence}  ${m.status}${iterLabel ? '  ' + iterLabel : ''}\n`;
-      text += `${'─'.repeat(34)}\n`;
-      text += `centroid: (${Math.round(q.centroid.x)}, ${Math.round(q.centroid.y)})\n`;
-      text += `area: ${Math.round(m.area)}\n`;
-      text += `score: ${m.score === Infinity ? '∞' : fmtf(m.score)}\n`;
-      if (m.gridPos) {
-        text += `grid centroid: (${fmtf(m.gridPos.gx)}, ${fmtf(m.gridPos.gy)})\n`;
-      }
-      if (m.cornerGridPos) {
+      let text;
+      if (isQuad) {
+        const q = quads[bestQuadIdx];
+        const m = quadMeta[bestQuadIdx];
+        const iterLabel = m.iter === -1 ? 'seed' : m.iter === 0 ? 'RANSAC' : m.iter !== null ? `iter ${m.iter}` : '';
+        text = `quad ${m.i}  conf=${m.confidence}  ${m.status}${iterLabel ? '  ' + iterLabel : ''}\n`;
         text += `${'─'.repeat(34)}\n`;
-        text += `corners (grid space):\n`;
-        for (let j = 0; j < 4; j++) {
-          const c = m.cornerGridPos[j];
-          const px = q.vertices[j];
-          text += `  v${j}: (${Math.round(px.x)},${Math.round(px.y)})`;
-          if (c) text += ` → (${fmtf(c.gx)}, ${fmtf(c.gy)})`;
+        text += `centroid: (${Math.round(q.centroid.x)}, ${Math.round(q.centroid.y)})\n`;
+        text += `area: ${Math.round(m.area)}\n`;
+        text += `score: ${m.score === Infinity ? '∞' : fmtf(m.score)}\n`;
+        if (m.gridPos) {
+          text += `grid centroid: (${fmtf(m.gridPos.gx)}, ${fmtf(m.gridPos.gy)})\n`;
+        }
+        if (m.cornerGridPos) {
+          text += `${'─'.repeat(34)}\n`;
+          text += `corners (grid space):\n`;
+          for (let j = 0; j < 4; j++) {
+            const c = m.cornerGridPos[j];
+            const px = q.vertices[j];
+            text += `  v${j}: (${Math.round(px.x)},${Math.round(px.y)})`;
+            if (c) text += ` → (${fmtf(c.gx)}, ${fmtf(c.gy)})`;
+            text += '\n';
+          }
+        }
+        if (m.families) {
+          text += `${'─'.repeat(34)}\n`;
+          text += `edge pairs: row=${m.families.rowEdges} col=${m.families.colEdges}\n`;
+        }
+      } else {
+        const em = ellipseMeta[bestEllIdx];
+        const ell = em.ell;
+        const iterLabel = em.iter !== null ? `iter ${em.iter}` : '';
+        text = `ellipse ${em.ei}  ${em.isInlier ? 'inlier' : 'non-inlier'}${iterLabel ? '  ' + iterLabel : ''}\n`;
+        text += `${'─'.repeat(34)}\n`;
+        text += `center: (${Math.round(ell.center.x)}, ${Math.round(ell.center.y)})\n`;
+        text += `axes: a=${ell.axes.a.toFixed(1)} b=${ell.axes.b.toFixed(1)}  angle=${ell.angle.toFixed(1)}°\n`;
+        text += `ecc: ${ell.eccentricity.toFixed(2)}  meander: ${ell.meanderRatio.toFixed(2)}  fitRms: ${ell.fitRms.toFixed(2)}\n`;
+        text += `score: ${em.score === Infinity ? '∞' : fmtf(em.score)}\n`;
+        if (em.gridPos) {
+          text += `grid: (${fmtf(em.gridPos.gx)}, ${fmtf(em.gridPos.gy)})`;
+          if (em.gridCell) text += ` → cell (${em.gridCell.gi}, ${em.gridCell.gj})`;
           text += '\n';
         }
-      }
-      if (m.families) {
-        text += `${'─'.repeat(34)}\n`;
-        text += `edge pairs: row=${m.families.rowEdges} col=${m.families.colEdges}\n`;
       }
 
       el('debug-content').textContent = text;
