@@ -161,6 +161,10 @@
         <label for="s-minArcLen">minArcLen</label>
         <input type="range" id="s-minArcLen" min="5" max="40" step="1">
         <span class="val" id="s-minArcLen-val"></span>
+
+        <label for="s-stoneH">stoneH</label>
+        <input type="range" id="s-stoneH" min="0.1" max="0.5" step="0.05">
+        <span class="val" id="s-stoneH-val"></span>
       </span>
 
       <button id="s-copy" style="font-size:0.72rem;padding:0.15rem 0.5rem">Copy settings</button>
@@ -363,6 +367,7 @@
       ['s-ellipseTol',    0.3],
       ['s-fitRmsMax',     2.5],
       ['s-minArcLen',     30],
+      ['s-stoneH',        0.3],
     ];
     // Number inputs: [id, defaultValue]  (empty string = auto)
     const NUMBERS = [
@@ -1343,12 +1348,15 @@
         // --- Orientation: circular median, gated by eccentricity ---
         let angleTol = Infinity;  // disabled by default
         let angleMedian = 0;
-        if (eccMedian < 0.6) {
+        // Compute orientation consensus from elongated stones (ecc < 0.85).
+        // Only elongated stones have a meaningful angle; round ones are skipped.
+        const elongated = merged.filter(e => e.eccentricity < 0.85);
+        if (elongated.length >= 5) {
           // Weighted circular mean direction (weight = 1 - eccentricity, i.e. more elongated = more weight)
           // Angles have 180° ambiguity, so double them before averaging
           let sinSum = 0, cosSum = 0;
-          for (const e of merged) {
-            const w = 1 - e.eccentricity;  // lower ecc ratio = more elongated = more weight
+          for (const e of elongated) {
+            const w = 1 - e.eccentricity;
             const rad2 = e.angle * 2 * Math.PI / 180;
             sinSum += w * Math.sin(rad2);
             cosSum += w * Math.cos(rad2);
@@ -1378,8 +1386,8 @@
             });
             continue;
           }
-          if (angleTol < Infinity) {
-            // Angular difference with 180° ambiguity
+          if (angleTol < Infinity && e.eccentricity < 0.85) {
+            // Only check orientation for elongated stones — round ones have no reliable angle
             let adiff = Math.abs(e.angle - angleMedian) % 180;
             if (adiff > 90) adiff = 180 - adiff;
             if (adiff > angleTol) {
@@ -1508,31 +1516,40 @@
 
     /**
      * Correct an ellipse center for stone-thickness parallax.
-     * A stone of height h ≈ 0.4 * diameter appears shifted along the minor axis
-     * direction (away from camera). The correction shifts the center back toward
-     * the true intersection.
      *
-     * Shift magnitude: 0.8 * a * sqrt(1 - (b/a)²)  (a=semi-major, b=semi-minor)
-     * Direction: along minor axis; sign chosen by whichever gives a better
-     * grid-space score under H (closer to integer position).
+     * The detected ellipse center is the visual center of the stone's top
+     * surface as seen from the camera. This is NOT the geometric top of the
+     * stone — the viewing angle means the visible center is shifted toward
+     * the camera (lower in the image) compared to the true top. Meanwhile,
+     * the board intersection we want (B) is directly below the stone top.
+     *
+     * The principled correction would be: (1) estimate the stone's true top
+     * from the visual center and viewing angle, then (2) project vertically
+     * down to the board plane. Our simplified approach skips step 1 and just
+     * shifts the visual center downward along the minor axis. This slightly
+     * overcorrects (lands past B), so we use a reduced stoneH multiplier
+     * to compensate.
+     *
+     * Assumes the board is roughly face-up (normal toward top of image).
      */
-    function correctEllipseParallax(ellipse, H) {
+    function correctEllipseParallax(ellipse, H, stoneH = 0.3) {
       const { center, axes, angle } = ellipse;
       const a = Math.max(axes.a, axes.b);
       const b = Math.min(axes.a, axes.b);
       const ratio = b / a;
       if (ratio > 0.95) return center; // nearly circular — negligible parallax
-      const shiftMag = 0.8 * a * Math.sqrt(1 - ratio * ratio);
+      // shiftMag = 2 * stoneH * a * sin(θ), where sin(θ) = sqrt(1 - (b/a)²)
+      const shiftMag = 2 * stoneH * a * Math.sqrt(1 - ratio * ratio);
       // Minor axis direction (perpendicular to major axis)
       const angleRad = angle * Math.PI / 180;
       const mx = -Math.sin(angleRad);
       const my = Math.cos(angleRad);
-      // Try both signs, pick the one with lower grid-space error
-      const c1 = { x: center.x + shiftMag * mx, y: center.y + shiftMag * my };
-      const c2 = { x: center.x - shiftMag * mx, y: center.y - shiftMag * my };
-      const s1 = scoreEllipseCenter(H, c1);
-      const s2 = scoreEllipseCenter(H, c2);
-      return s1 < s2 ? c1 : c2;
+      // Pick the sign that moves downward (+y in pixel space)
+      const sign = my > 0 ? 1 : -1;
+      return {
+        x: center.x + shiftMag * mx * sign,
+        y: center.y + shiftMag * my * sign,
+      };
     }
 
     /**
@@ -1845,6 +1862,7 @@
       let bestInliers = [];
       let bestSeed = 0;
       let bestH = null;
+      let bestSpreadArea = 0;
 
       // Prefer high-confidence quads as seeds
       const seedCandidates = [];
@@ -1877,10 +1895,26 @@
           }
         }
 
-        if (inliers.length > bestInliers.length) {
+        // Score by inlier count weighted by spatial spread.
+        // This favors seeds that cover more of the board over narrow strips.
+        let spreadArea = 0;
+        if (inliers.length >= 2) {
+          let gMinX = Infinity, gMaxX = -Infinity, gMinY = Infinity, gMaxY = -Infinity;
+          for (const idx of inliers) {
+            const g = applyHomography(H, quads[idx].centroid);
+            if (!g) continue;
+            gMinX = Math.min(gMinX, g.x); gMaxX = Math.max(gMaxX, g.x);
+            gMinY = Math.min(gMinY, g.y); gMaxY = Math.max(gMaxY, g.y);
+          }
+          spreadArea = (gMaxX - gMinX) * (gMaxY - gMinY);
+        }
+        const score = inliers.length * Math.sqrt(Math.max(1, spreadArea));
+        const bestScore = bestInliers.length * Math.sqrt(Math.max(1, bestSpreadArea));
+        if (score > bestScore) {
           bestInliers = inliers;
           bestSeed = si;
           bestH = H;
+          bestSpreadArea = spreadArea;
         }
       }
 
@@ -1893,7 +1927,7 @@
         const inlierScores = scores.filter(s => s.score < gridTol);
         const outlierScores = scores.filter(s => s.score >= gridTol);
         console.log(`[quadGrid] RANSAC grid: seed=${bestSeed} conf=${quads[bestSeed]?.confidence} ` +
-          `inliers=${bestInliers.length}/${quads.length} tol=${gridTol}`);
+          `inliers=${bestInliers.length}/${quads.length} tol=${gridTol} spread=${bestSpreadArea.toFixed(1)}`);
         console.log(`[quadGrid] inlier scores: ` +
           `min=${inlierScores[0]?.score.toFixed(3)} ` +
           `median=${inlierScores[Math.floor(inlierScores.length / 2)]?.score.toFixed(3)} ` +
@@ -2460,7 +2494,7 @@
           const strictTol = ellipseTol * 0.25;
           let tier1Count = 0, tier2Count = 0;
           for (const ei of ellipseInliers) {
-            const corrected = correctEllipseParallax(ellipses[ei], currentH);
+            const corrected = correctEllipseParallax(ellipses[ei], currentH, parseFloat(el('s-stoneH').value));
             const idx = gridIndex(currentH, corrected, currentStepX, currentStepY);
             if (!idx) continue;
             const prev = ellipseGridMap.get(ei);
@@ -2539,7 +2573,7 @@
           const ellipseAddLog = [];
           for (let ei = 0; ei < ellipses.length; ei++) {
             if (ellipseInliers.has(ei)) continue;
-            const corrected = correctEllipseParallax(ellipses[ei], iterH);
+            const corrected = correctEllipseParallax(ellipses[ei], iterH, parseFloat(el('s-stoneH').value));
             const score = scoreEllipseCenter(iterH, corrected);
             if (score >= ellipseTol) continue;
             const g = applyHomography(iterH, corrected);
@@ -2656,7 +2690,7 @@
         // Add ellipse correspondences
         const partialCorners = srcPts.length - fullInlierCorners;
         for (const ei of ellipseInliers) {
-          const corrected = correctEllipseParallax(ellipses[ei], currentH);
+          const corrected = correctEllipseParallax(ellipses[ei], currentH, parseFloat(el('s-stoneH').value));
           const idx = gridIndex(currentH, corrected, currentStepX, currentStepY);
           if (!idx) continue;
           srcPts.push(corrected);
@@ -2777,7 +2811,7 @@
           // Check ellipse centers (use parallax-corrected center for grid cell,
           // but raw center for pixel-space nearest-fixture lookup)
           for (const ei of ellipseInliers) {
-            const corrected = correctEllipseParallax(ellipses[ei], refinedH);
+            const corrected = correctEllipseParallax(ellipses[ei], refinedH, parseFloat(el('s-stoneH').value));
             const cell = gridCell(corrected);
             if (!cell) continue;
             const result = fixtureCheck(ellipses[ei].center, cell.gi, cell.gj, `e${ei}`);
@@ -2915,13 +2949,20 @@
         }
         ctx.globalAlpha = 1.0;
 
-        // Inlier ellipse centers: small diamonds colored by iteration
+        // Parallax-corrected ellipse centers: diamonds for all candidates
         const dSize = Math.max(4, Math.round(Math.min(W, H) / 200));
-        for (const ei of ellipseInliers) {
-          const iter = ellipseIterMap.get(ei) ?? 0;
-          ctx.fillStyle = iterColor(iter);
-          ctx.globalAlpha = 0.9;
-          const { x, y } = ellipses[ei].center;
+        for (let ei = 0; ei < ellipses.length; ei++) {
+          const isInlier = ellipseInliers.has(ei);
+          const corrected = iteratedH ? correctEllipseParallax(ellipses[ei], iteratedH, parseFloat(el('s-stoneH').value)) : ellipses[ei].center;
+          const { x, y } = corrected;
+          if (isInlier) {
+            const iter = ellipseIterMap.get(ei) ?? 0;
+            ctx.fillStyle = iterColor(iter);
+            ctx.globalAlpha = 0.9;
+          } else {
+            ctx.fillStyle = '#4af';
+            ctx.globalAlpha = 0.35;
+          }
           ctx.beginPath();
           ctx.moveTo(x, y - dSize);
           ctx.lineTo(x + dSize, y);
@@ -3094,8 +3135,9 @@
         let score = Infinity;
         let gridPos = null;
         if (scoreH) {
-          score = scoreEllipseCenter(scoreH, ell.center);
-          const g = applyHomography(scoreH, ell.center);
+          const corrected = correctEllipseParallax(ell, scoreH, parseFloat(el('s-stoneH').value));
+          score = scoreEllipseCenter(scoreH, corrected);
+          const g = applyHomography(scoreH, corrected);
           if (g) gridPos = { gx: g.x, gy: g.y };
         }
         return { ei, isInlier, iter, gridCell, score, gridPos, ell };
