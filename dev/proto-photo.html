@@ -1152,7 +1152,7 @@
       cv.findContours(dilated, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_NONE);
       dilated.delete(); kernel.delete(); hierarchy.delete();
 
-      const minArea = Math.PI * minR * minR * 0.3;
+      const minArea = Math.PI * (minR * 0.4) * (minR * 0.4) * 0.3;
       const maxArea = Math.PI * maxR * maxR * 2;
       const candidates = [];
       const contourDebug = [];     // debug info for accepted candidates
@@ -1261,10 +1261,10 @@
           continue;
         }
 
-        if (avgR < minR * 0.7 || avgR > maxR * 1.3) {
+        if (avgR < minR * 0.4 || avgR > maxR * 1.5) {
           rejectedDebug.push({
             allPts, smoothMask, arcLabels, arcs,
-            rejectReason: `radius ${avgR.toFixed(1)} outside [${(minR*0.7).toFixed(1)}, ${(maxR*1.3).toFixed(1)}]`,
+            rejectReason: `radius ${avgR.toFixed(1)} outside [${(minR*0.4).toFixed(1)}, ${(maxR*1.5).toFixed(1)}]`,
             ellipse: { center: rr.center, axes: { a, b }, angle, meanderRatio, fitRms },
           });
           continue;
@@ -1332,12 +1332,38 @@
       // from circular median, weighted by eccentricity.
 
       const preOutlier = merged.length;
+      /** @type {number[] | null} */ let sizeCoeffsA = null;
+      /** @type {number[] | null} */ let sizeCoeffsB = null;
       if (merged.length >= 6) {
         // --- Size: RANSAC linear model on major axis ---
-        const sizeInlierMask = ransacLinearModel(
-          merged.map(e => [e.center.x, e.center.y, e.axes.a]),
-          0.25,  // fractional tolerance: 25% of predicted value
-          100,   // iterations
+        // Exclude bottom 25th percentile by `a` from RANSAC sampling to avoid
+        // fitting noise contours that outnumber real stones in the candidate pool.
+        // The inlier check still runs on ALL candidates.
+        const sortedA = merged.map(e => e.axes.a).sort((a, b) => a - b);
+        const aFloor = sortedA[Math.floor(sortedA.length * 0.25)];
+        const sizeData = merged.map(e => [e.center.x, e.center.y, e.axes.a]);
+        const sizePool = [];
+        for (let i = 0; i < sizeData.length; i++) {
+          if (sizeData[i][2] >= aFloor) sizePool.push(i);
+        }
+        /** @type {boolean[]} */ let sizeInlierMask;
+        ({ inliers: sizeInlierMask, coeffs: sizeCoeffsA } = ransacLinearModel(
+          sizeData, 0.25, 100, false, sizePool,
+        ));
+        // --- Minor axis + orientation models (for future partial-arc fitting) ---
+        ({ coeffs: sizeCoeffsB } = ransacLinearModel(
+          merged.map(e => [e.center.x, e.center.y, e.axes.b]),
+          0.25, 100,
+        ));
+        // Orientation: fit sin(2θ) and cos(2θ) as linear spatial models to handle wrapping.
+        // Use absolute tolerance since sin/cos range from -1 to 1.
+        const { coeffs: angleCoeffsSin } = ransacLinearModel(
+          merged.map(e => [e.center.x, e.center.y, Math.sin(2 * e.angle * Math.PI / 180)]),
+          0.5, 100, true,
+        );
+        const { coeffs: angleCoeffsCos } = ransacLinearModel(
+          merged.map(e => [e.center.x, e.center.y, Math.cos(2 * e.angle * Math.PI / 180)]),
+          0.5, 100, true,
         );
 
         // --- Eccentricity: global median ± k*MAD ---
@@ -1373,17 +1399,23 @@
         // Apply all three filters
         const kept = [];
         const keptDebug = [];
+        const sizeOutlierLog = [];
+        const eccOutlierLog = [];
+        const angleOutlierLog = [];
         for (let i = 0; i < merged.length; i++) {
           const e = merged[i];
           if (!sizeInlierMask[i]) {
+            const predA = sizeCoeffsA ? sizeCoeffsA[0] + sizeCoeffsA[1] * e.center.x + sizeCoeffsA[2] * e.center.y : NaN;
+            sizeOutlierLog.push(`(${e.center.x.toFixed(0)},${e.center.y.toFixed(0)}) a=${e.axes.a.toFixed(1)} pred=${predA.toFixed(1)}`);
             rejectedDebug.push({
               ...mergedDebug[i],
-              rejectReason: `size outlier (a=${e.axes.a.toFixed(1)})`,
+              rejectReason: `size outlier (a=${e.axes.a.toFixed(1)}, pred=${predA.toFixed(1)})`,
               ellipse: e,
             });
             continue;
           }
           if (e.eccentricity < eccLo || e.eccentricity > eccHi) {
+            eccOutlierLog.push(`(${e.center.x.toFixed(0)},${e.center.y.toFixed(0)}) ecc=${e.eccentricity.toFixed(2)}`);
             rejectedDebug.push({
               ...mergedDebug[i],
               rejectReason: `eccentricity outlier ${e.eccentricity.toFixed(2)} outside [${eccLo.toFixed(2)}, ${eccHi.toFixed(2)}]`,
@@ -1396,6 +1428,7 @@
             let adiff = Math.abs(e.angle - angleMedian) % 180;
             if (adiff > 90) adiff = 180 - adiff;
             if (adiff > angleTol) {
+              angleOutlierLog.push(`(${e.center.x.toFixed(0)},${e.center.y.toFixed(0)}) ang=${e.angle.toFixed(1)}° diff=${adiff.toFixed(1)}°`);
               rejectedDebug.push({
                 ...mergedDebug[i],
                 rejectReason: `orientation outlier ${e.angle.toFixed(1)}° vs median ${angleMedian.toFixed(1)}° (diff=${adiff.toFixed(1)}°)`,
@@ -1407,8 +1440,17 @@
           kept.push(e);
           keptDebug.push(mergedDebug[i]);
         }
+        if (sizeOutlierLog.length > 0) console.log(`[ellipse] size outliers (${sizeOutlierLog.length}): ${sizeOutlierLog.join(', ')}`);
+        if (eccOutlierLog.length > 0) console.log(`[ellipse] ecc outliers (${eccOutlierLog.length}): ${eccOutlierLog.join(', ')}`);
+        if (angleOutlierLog.length > 0) console.log(`[ellipse] angle outliers (${angleOutlierLog.length}): ${angleOutlierLog.join(', ')}`);
+        console.log(`[ellipse] ecc band: [${eccLo.toFixed(2)}, ${eccHi.toFixed(2)}], angle median: ${angleMedian.toFixed(1)}° ±${angleTol}°`);
         merged.length = 0; merged.push(...kept);
         mergedDebug.length = 0; mergedDebug.push(...keptDebug);
+      }
+
+      if (sizeCoeffsA) {
+        console.log(`[ellipse] size model: a = ${sizeCoeffsA[0].toFixed(2)} + ${sizeCoeffsA[1].toFixed(4)}·x + ${sizeCoeffsA[2].toFixed(4)}·y`);
+        if (sizeCoeffsB) console.log(`[ellipse] size model: b = ${sizeCoeffsB[0].toFixed(2)} + ${sizeCoeffsB[1].toFixed(4)}·x + ${sizeCoeffsB[2].toFixed(4)}·y`);
       }
 
       console.log(`[ellipse] ${candidates.length} pre-dedup → ${preOutlier} deduped → ${merged.length} after outlier rejection, ${rejectedDebug.length} total rejected`);
@@ -1418,12 +1460,17 @@
     /**
      * RANSAC linear model: z = c0 + c1*x + c2*y
      * Input: array of [x, y, z] triples.
-     * Returns boolean array: true = inlier.
+     * Returns { inliers: boolean[], coeffs: [c0, c1, c2] | null }.
      * fracTol: fractional tolerance (|predicted - actual| / predicted < fracTol).
+     * If absolute is true, fracTol is used as absolute tolerance instead.
+     * samplePool: if provided, an array of indices into data to sample from
+     *   (RANSAC picks 3 samples from this subset, but scores ALL data points).
      */
-    function ransacLinearModel(data, fracTol, maxIter) {
+    function ransacLinearModel(data, fracTol, maxIter, absolute = false, samplePool = null) {
       const n = data.length;
-      if (n < 3) return new Array(n).fill(true);
+      if (n < 3) return { inliers: new Array(n).fill(true), coeffs: null };
+      const pool = samplePool || Array.from({ length: n }, (_, i) => i);
+      if (pool.length < 3) return { inliers: new Array(n).fill(true), coeffs: null };
 
       const solveLinear3 = (pts) => {
         const [x0, y0, z0] = pts[0], [x1, y1, z1] = pts[1], [x2, y2, z2] = pts[2];
@@ -1440,22 +1487,23 @@
 
       let bestInliers = [];
       let bestCount = 0;
+      const pn = pool.length;
 
       for (let iter = 0; iter < maxIter; iter++) {
-        const i0 = Math.floor(Math.random() * n);
-        let i1 = i0, i2 = i0;
-        while (i1 === i0) i1 = Math.floor(Math.random() * n);
-        while (i2 === i0 || i2 === i1) i2 = Math.floor(Math.random() * n);
+        const pi0 = pool[Math.floor(Math.random() * pn)];
+        let pi1 = pi0, pi2 = pi0;
+        while (pi1 === pi0) pi1 = pool[Math.floor(Math.random() * pn)];
+        while (pi2 === pi0 || pi2 === pi1) pi2 = pool[Math.floor(Math.random() * pn)];
 
-        const coeffs = solveLinear3([data[i0], data[i1], data[i2]]);
+        const coeffs = solveLinear3([data[pi0], data[pi1], data[pi2]]);
         if (!coeffs) continue;
 
         const inliers = [];
         for (let i = 0; i < n; i++) {
           const pred = predict(coeffs, data[i][0], data[i][1]);
-          if (pred > 0 && Math.abs(data[i][2] - pred) / pred < fracTol) {
-            inliers.push(i);
-          }
+          const err = Math.abs(data[i][2] - pred);
+          const ok = absolute ? (err < fracTol) : (pred > 0 && err / pred < fracTol);
+          if (ok) inliers.push(i);
         }
 
         if (inliers.length > bestCount) {
@@ -1497,16 +1545,16 @@
           const result = new Array(n).fill(false);
           for (let i = 0; i < n; i++) {
             const pred = predict(coeffs, data[i][0], data[i][1]);
-            if (pred > 0 && Math.abs(data[i][2] - pred) < threshold) {
+            if ((absolute || pred > 0) && Math.abs(data[i][2] - pred) < threshold) {
               result[i] = true;
             }
           }
-          return result;
+          return { inliers: result, coeffs };
         }
       }
 
       // Fallback: accept all
-      return new Array(n).fill(true);
+      return { inliers: new Array(n).fill(true), coeffs: null };
     }
 
     /**
@@ -2385,10 +2433,11 @@
         hoverTargets.push({
           cx: ell.center.x, cy: ell.center.y,
           matchR: ell.axes.a + ell.axes.b,
-          dbg: contourDebug[i], accepted: true,
+          dbg: contourDebug[i], accepted: true, label: `ellipse #${i}`,
         });
       }
-      for (const rej of rejectedDebug) {
+      for (let ri = 0; ri < rejectedDebug.length; ri++) {
+        const rej = rejectedDebug[ri];
         // Estimate a match radius from contour bbox
         let bxMin = Infinity, bxMax = -Infinity, byMin = Infinity, byMax = -Infinity;
         for (const p of rej.allPts) {
@@ -2398,7 +2447,7 @@
         const matchR = Math.max(bxMax - bxMin, byMax - byMin) * 0.6;
         hoverTargets.push({
           cx: rej._centroid.x, cy: rej._centroid.y,
-          matchR, dbg: rej, accepted: false,
+          matchR, dbg: rej, accepted: false, label: `rejected #${ri}`,
         });
       }
 
@@ -2412,6 +2461,17 @@
 
       if (canvas._hoverHandler) canvas.removeEventListener('mousemove', canvas._hoverHandler);
       if (canvas._leaveHandler) canvas.removeEventListener('mouseleave', canvas._leaveHandler);
+      if (canvas._clickHandler) canvas.removeEventListener('click', canvas._clickHandler);
+
+      canvas._clickHandler = () => {
+        if (canvas._lastHoverInfo) {
+          navigator.clipboard.writeText(canvas._lastHoverInfo).then(
+            () => console.log('[raw-features] copied to clipboard'),
+            (err) => console.warn('[raw-features] clipboard write failed:', err),
+          );
+        }
+      };
+      canvas.addEventListener('click', canvas._clickHandler);
 
       canvas._leaveHandler = () => {
         ctx.putImageData(baseImage, 0, 0);
@@ -2550,7 +2610,8 @@
 
         // Info text
         const totalSmooth = dbg.arcs.reduce((s, a) => s + a.length, 0);
-        let info = `contour: ${dbg.allPts.length} pts\n`;
+        let info = `${target.label} @ (${target.cx.toFixed(0)}, ${target.cy.toFixed(0)})\n`;
+        info += `contour: ${dbg.allPts.length} pts\n`;
         info += `arcs: ${dbg.arcs.length}`;
         if (dbg.arcs.length > 0) {
           info += ` (${dbg.arcs.map((a, i) => ARC_COLORS[i % ARC_COLORS.length].slice(0,4) + ':' + a.length).join(', ')})`;
@@ -2558,6 +2619,7 @@
         info += `\nfit pts: ${totalSmooth} (${(totalSmooth / dbg.allPts.length * 100).toFixed(0)}%)`;
         if (ell) {
           info += `\nellipse: a=${ell.axes.a.toFixed(1)} b=${ell.axes.b.toFixed(1)} ang=${ell.angle.toFixed(1)}°`;
+          if (ell.eccentricity != null) info += ` ecc=${ell.eccentricity.toFixed(2)}`;
           if (ell.meanderRatio != null) {
             info += `\nmeander: ${ell.meanderRatio.toFixed(2)}  fitRms: ${ell.fitRms.toFixed(2)}`;
           }
@@ -2566,6 +2628,7 @@
           info += `\nREJECTED: ${dbg.rejectReason}`;
         }
         el('contour-info').textContent = info;
+        canvas._lastHoverInfo = info;
 
         // Position panel near cursor
         const panel = el('contour-panel');
