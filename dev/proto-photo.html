@@ -1238,6 +1238,7 @@
         const angRad = angle * Math.PI / 180;
         const cosA = Math.cos(angRad), sinA = Math.sin(angRad);
         let sumSqDist = 0;
+        const fitThetas = [];
         for (const p of fitPts) {
           // Translate to ellipse center, rotate into ellipse-aligned frame
           const dx = p.x - rr.center.x, dy = p.y - rr.center.y;
@@ -1247,12 +1248,24 @@
           const rActual = Math.sqrt(lx * lx + ly * ly);
           // Ellipse radius at this angle: r = ab / sqrt((b*cos)^2 + (a*sin)^2)
           const theta = Math.atan2(ly, lx);
+          fitThetas.push(theta);
           const ct = Math.cos(theta), st = Math.sin(theta);
           const rEllipse = (a * b) / Math.sqrt((b * ct) ** 2 + (a * st) ** 2);
           const diff = rActual - rEllipse;
           sumSqDist += diff * diff;
         }
         const fitRms = Math.sqrt(sumSqDist / fitPts.length);
+
+        // Angular span of fit points on the fitted ellipse (conditioning measure)
+        fitThetas.sort((u, v) => u - v);
+        let maxGap = 0;
+        for (let k = 1; k < fitThetas.length; k++) {
+          const gap = fitThetas[k] - fitThetas[k - 1];
+          if (gap > maxGap) maxGap = gap;
+        }
+        const wrapGap = (2 * Math.PI) - (fitThetas[fitThetas.length - 1] - fitThetas[0]);
+        if (wrapGap > maxGap) maxGap = wrapGap;
+        const angSpan = (2 * Math.PI - maxGap) * 180 / Math.PI;
 
         // Helper: save individual arcs for pass-2 constrained fitting
         const saveArcsForPass2 = () => {
@@ -1312,6 +1325,7 @@
           eccentricity,
           meanderRatio,
           fitRms,
+          angSpan,
         };
         candidates.push(candidate);
         contourDebug.push({
@@ -1386,7 +1400,14 @@
         const sizeData = merged.map(e => [e.center.x, e.center.y, e.axes.a]);
         const sizePool = [];
         for (let i = 0; i < sizeData.length; i++) {
-          if (sizeData[i][2] >= aFloor) sizePool.push(i);
+          if (sizeData[i][2] >= aFloor && merged[i].angSpan >= 90) sizePool.push(i);
+        }
+        // Fall back to size-only filter if angular span is too restrictive
+        if (sizePool.length < 3) {
+          sizePool.length = 0;
+          for (let i = 0; i < sizeData.length; i++) {
+            if (sizeData[i][2] >= aFloor) sizePool.push(i);
+          }
         }
         /** @type {boolean[]} */ let sizeInlierMask;
         ({ inliers: sizeInlierMask, coeffs: sizeCoeffsA } = ransacLinearModel(
@@ -2864,6 +2885,7 @@
         if (ell) {
           info += `\nellipse: a=${ell.axes.a.toFixed(1)} b=${ell.axes.b.toFixed(1)} ang=${ell.angle.toFixed(1)}°`;
           if (ell.eccentricity != null) info += ` ecc=${ell.eccentricity.toFixed(2)}`;
+          if (ell.angSpan != null) info += ` span=${ell.angSpan.toFixed(0)}°`;
           if (ell.meanderRatio != null) {
             info += `\nmeander: ${ell.meanderRatio.toFixed(2)}  fitRms: ${ell.fitRms.toFixed(2)}`;
           }
