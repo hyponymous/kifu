@@ -65,6 +65,12 @@
     <button id="lens-reset-btn" hidden>Reset Lens</button>
     <span style="color:#444; margin:0 0.1rem;">|</span>
     <button id="toggle-dumbbells" class="tool-btn">Dumbbells</button>
+    <button id="toggle-ellipses" class="tool-btn">Ellipses</button>
+    <span class="param" id="thickness-param" style="display:none">
+      <label for="stone-thickness">thickness</label>
+      <input type="range" id="stone-thickness" min="0" max="1" step="0.02" value="0.3" style="width:80px">
+      <span id="stone-thickness-val" style="min-width:2.2em">0.30</span>
+    </span>
   </div>
 
   <div id="metrics"></div>
@@ -132,6 +138,15 @@
 
     // Dumbbell overlay toggle
     let showDumbbells = false;
+    // Ellipse overlay toggle
+    let showEllipses = false;
+    let stoneThickness = 0.3;
+
+    // Ellipse editing state
+    /** @type {string | null} */ let selectedEllipseKey = null;  // "r,c" or null
+    /** @type {string | null} */ let ellipseDragMode = null;     // 'center' | 'majorA' | 'majorB' | 'minorA' | 'minorB' | null
+    /** @type {{ [key: string]: { dcx?: number, dcy?: number, da?: number, db?: number, dangle?: number } }} */
+    let ellipseOverrides = {};  // per-ellipse manual adjustments (deltas from computed)
 
     // ── Lens tool state ───────────────────────────────────────────────────
     let lensCorners = [];         // 4 points [{x,y}, ...] — board corners in image space
@@ -188,10 +203,174 @@
       return applyHomography(H, u, v);
     }
 
+    /**
+     * Compute predicted stone ellipses from the lens homography.
+     * For each stone, uses the local Jacobian of H (unit-square → image) to
+     * transform a circle of radius gridStep/2 into an ellipse, then shifts
+     * the center by parallax based on stoneThickness.
+     * Returns object keyed by "r,c" with {cx, cy, a, b, angle}.
+     */
+    function computeStoneEllipses(thickness) {
+      if (lensCorners.length !== 4 || !editableStones || nRows < 2 || nCols < 2) return null;
+      const unitSquare = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 1, y: 1 }, { x: 0, y: 1 }];
+      const H = computeHomography(unitSquare, lensCorners);
+
+      // Grid step in unit-square coords
+      const du = 1 / (nCols - 1);
+      const dv = 1 / (nRows - 1);
+      // Stone radius in unit-square coords (half a grid step, average of both dirs)
+      const stoneR = (du + dv) / 4;
+
+      const eps = 0.001;  // for numerical Jacobian
+      const result = {};
+
+      for (let r = 0; r < nRows; r++) {
+        for (let c = 0; c < nCols; c++) {
+          if (editableStones[r][c] === '.') continue;
+
+          const u = c / (nCols - 1);
+          const v = r / (nRows - 1);
+          const center = applyHomography(H, u, v);
+
+          // Numerical Jacobian: J = [∂img/∂u, ∂img/∂v] (2×2)
+          const pu = applyHomography(H, u + eps, v);
+          const pv = applyHomography(H, u, v + eps);
+          const J = [
+            [(pu.x - center.x) / eps, (pv.x - center.x) / eps],
+            [(pu.y - center.y) / eps, (pv.y - center.y) / eps],
+          ];
+
+          // A circle of radius stoneR in (u,v) space maps to an ellipse in image space.
+          // The ellipse axes are the singular values of J (times stoneR), and the
+          // orientation comes from the LEFT singular vectors — eigenvectors of J·Jᵀ.
+          const JJt = [
+            [J[0][0] * J[0][0] + J[0][1] * J[0][1], J[0][0] * J[1][0] + J[0][1] * J[1][1]],
+            [J[1][0] * J[0][0] + J[1][1] * J[0][1], J[1][0] * J[1][0] + J[1][1] * J[1][1]],
+          ];
+
+          // Eigenvalues of 2×2 symmetric matrix
+          const avg = (JJt[0][0] + JJt[1][1]) / 2;
+          const diff = (JJt[0][0] - JJt[1][1]) / 2;
+          const disc = Math.sqrt(diff * diff + JJt[0][1] * JJt[0][1]);
+          const lam1 = avg + disc;  // larger eigenvalue
+          const lam2 = avg - disc;  // smaller eigenvalue
+          if (lam1 <= 0 || lam2 <= 0) continue;
+
+          const a = stoneR * Math.sqrt(lam1);  // semi-major
+          const b = stoneR * Math.sqrt(lam2);  // semi-minor
+          // Eigenvector for lam1 → angle of major axis in image space
+          const angle = Math.atan2(JJt[0][1], lam1 - JJt[1][1]) * 180 / Math.PI;
+
+          // Parallax shift: stone top is elevated, appears shifted toward camera.
+          // Same logic as proto-photo correctEllipseParallax but reversed direction
+          // (from board position → apparent position, not the other way).
+          let cx = center.x, cy = center.y;
+          const ratio = b / a;
+          if (ratio < 0.95 && thickness > 0) {
+            const shiftMag = 2 * thickness * a * Math.sqrt(1 - ratio * ratio);
+            const angleRad = angle * Math.PI / 180;
+            const mx = -Math.sin(angleRad);
+            const my = Math.cos(angleRad);
+            // Shift upward in image space (toward camera = -y)
+            const sign = my > 0 ? -1 : 1;
+            cx += shiftMag * mx * sign;
+            cy += shiftMag * my * sign;
+          }
+
+          result[`${r},${c}`] = {
+            cx: Math.round(cx * 10) / 10,
+            cy: Math.round(cy * 10) / 10,
+            a: Math.round(a * 10) / 10,
+            b: Math.round(b * 10) / 10,
+            angle: Math.round(angle * 10) / 10,
+          };
+        }
+      }
+      return result;
+    }
+
+    /** Get the effective ellipse for a key, with manual overrides applied */
+    function getEffectiveEllipse(key, baseEllipses) {
+      const base = baseEllipses[key];
+      if (!base) return null;
+      const ov = ellipseOverrides[key];
+      if (!ov) return base;
+      return {
+        cx: base.cx + (ov.dcx || 0),
+        cy: base.cy + (ov.dcy || 0),
+        a: base.a + (ov.da || 0),
+        b: base.b + (ov.db || 0),
+        angle: base.angle + (ov.dangle || 0),
+      };
+    }
+
+    /** Get all effective ellipses (computed + overrides) */
+    function getEffectiveEllipses() {
+      const base = computeStoneEllipses(stoneThickness);
+      if (!base) return null;
+      const result = {};
+      for (const key of Object.keys(base)) {
+        result[key] = getEffectiveEllipse(key, base);
+      }
+      return result;
+    }
+
+    /**
+     * Hit-test ellipse handles and body. Returns:
+     * { key, mode: 'center'|'majorA'|'majorB'|'minorA'|'minorB'|'body' } or null
+     */
+    function hitTestEllipses(ix, iy) {
+      if (!showEllipses || lensCorners.length !== 4) return null;
+      const ellipses = getEffectiveEllipses();
+      if (!ellipses) return null;
+
+      const handleR = Math.max(8, sourceW / 80) / viewport.scale;
+
+      // If there's a selected ellipse, check its handles first
+      if (selectedEllipseKey && ellipses[selectedEllipseKey]) {
+        const ell = ellipses[selectedEllipseKey];
+        const rad = ell.angle * Math.PI / 180;
+        const cosA = Math.cos(rad), sinA = Math.sin(rad);
+
+        // Handle positions: center, major axis tips (±a), minor axis tips (±b)
+        const handles = [
+          { mode: 'center', hx: ell.cx, hy: ell.cy },
+          { mode: 'majorA', hx: ell.cx + ell.a * cosA, hy: ell.cy + ell.a * sinA },
+          { mode: 'majorB', hx: ell.cx - ell.a * cosA, hy: ell.cy - ell.a * sinA },
+          { mode: 'minorA', hx: ell.cx - ell.b * sinA, hy: ell.cy + ell.b * cosA },
+          { mode: 'minorB', hx: ell.cx + ell.b * sinA, hy: ell.cy - ell.b * cosA },
+        ];
+        for (const h of handles) {
+          if (Math.hypot(ix - h.hx, iy - h.hy) < handleR) {
+            return { key: selectedEllipseKey, mode: h.mode };
+          }
+        }
+      }
+
+      // Check ellipse bodies (point-in-ellipse test)
+      let bestKey = null, bestDist = Infinity;
+      for (const [key, ell] of Object.entries(ellipses)) {
+        const dx = ix - ell.cx, dy = iy - ell.cy;
+        const rad = ell.angle * Math.PI / 180;
+        const cosA = Math.cos(rad), sinA = Math.sin(rad);
+        const lx = dx * cosA + dy * sinA;
+        const ly = -dx * sinA + dy * cosA;
+        const norm = (lx / ell.a) ** 2 + (ly / ell.b) ** 2;
+        if (norm <= 1.2) {  // slightly generous hit area
+          const dist = Math.hypot(dx, dy);
+          if (dist < bestDist) { bestDist = dist; bestKey = key; }
+        }
+      }
+      if (bestKey) return { key: bestKey, mode: 'body' };
+      return null;
+    }
+
     /** Reset all lens state */
     function resetLens() {
       lensCorners = [];
       lensDragging = null;
+      ellipseOverrides = {};
+      selectedEllipseKey = null;
     }
 
     // ── Load image ──────────────────────────────────────────────────────────
@@ -373,6 +552,62 @@
           }
         }
       }
+
+      // Ellipse overlay
+      if (showEllipses && lensCorners.length === 4) {
+        const ellipses = getEffectiveEllipses();
+        if (ellipses) {
+          const lineW = Math.max(1.5, sourceW / 400) / viewport.scale;
+          ctx.lineWidth = lineW;
+          for (const [key, ell] of Object.entries(ellipses)) {
+            const [r, c] = key.split(',').map(Number);
+            const color = editableStones[r][c];
+            const isSelected = key === selectedEllipseKey;
+            const hasOverride = !!ellipseOverrides[key];
+            ctx.strokeStyle = isSelected
+              ? '#fff'
+              : hasOverride
+                ? (color === 'B' ? 'rgba(100, 220, 255, 1)' : 'rgba(255, 220, 100, 1)')
+                : (color === 'B' ? 'rgba(80, 180, 255, 0.8)' : 'rgba(255, 180, 80, 0.8)');
+            ctx.lineWidth = isSelected ? lineW * 2 : lineW;
+            ctx.save();
+            ctx.translate(ell.cx, ell.cy);
+            ctx.rotate(ell.angle * Math.PI / 180);
+            ctx.beginPath();
+            ctx.ellipse(0, 0, ell.a, ell.b, 0, 0, 2 * Math.PI);
+            ctx.stroke();
+            ctx.restore();
+          }
+
+          // Draw handles for selected ellipse
+          if (selectedEllipseKey && ellipses[selectedEllipseKey]) {
+            const ell = ellipses[selectedEllipseKey];
+            const rad = ell.angle * Math.PI / 180;
+            const cosA = Math.cos(rad), sinA = Math.sin(rad);
+            const hr = Math.max(5, sourceW / 120) / viewport.scale;
+
+            const handles = [
+              { hx: ell.cx, hy: ell.cy, fill: '#fff' },  // center
+              { hx: ell.cx + ell.a * cosA, hy: ell.cy + ell.a * sinA, fill: '#f44' },  // major A
+              { hx: ell.cx - ell.a * cosA, hy: ell.cy - ell.a * sinA, fill: '#f44' },  // major B
+              { hx: ell.cx - ell.b * sinA, hy: ell.cy + ell.b * cosA, fill: '#4f4' },  // minor A
+              { hx: ell.cx + ell.b * sinA, hy: ell.cy - ell.b * cosA, fill: '#4f4' },  // minor B
+            ];
+            for (const h of handles) {
+              ctx.beginPath();
+              ctx.arc(h.hx, h.hy, hr, 0, 2 * Math.PI);
+              ctx.fillStyle = h.fill;
+              ctx.globalAlpha = 0.8;
+              ctx.fill();
+              ctx.globalAlpha = 1;
+              ctx.strokeStyle = '#fff';
+              ctx.lineWidth = lineW;
+              ctx.stroke();
+            }
+          }
+        }
+      }
+
       ctx.restore();
     }
 
@@ -601,6 +836,19 @@
       drawInputCanvas();
     });
 
+    el('toggle-ellipses').addEventListener('click', () => {
+      showEllipses = !showEllipses;
+      el('toggle-ellipses').classList.toggle('active', showEllipses);
+      el('thickness-param').style.display = showEllipses ? '' : 'none';
+      drawInputCanvas();
+    });
+
+    el('stone-thickness').addEventListener('input', () => {
+      stoneThickness = parseFloat(el('stone-thickness').value);
+      el('stone-thickness-val').textContent = stoneThickness.toFixed(2);
+      drawInputCanvas();
+    });
+
     // Set tabZoomIndex so next Tab press lands on the given dot index
     function queueTabZoom(dotIdx) {
       const pinList = [...pinnedDots].sort((a, b) => a - b);
@@ -623,6 +871,19 @@
     });
 
     document.addEventListener('keydown', e => {
+      // Ellipse editing shortcuts
+      if (e.key === 'Escape' && selectedEllipseKey) {
+        selectedEllipseKey = null;
+        ellipseDragMode = null;
+        drawInputCanvas();
+        return;
+      }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedEllipseKey && showEllipses) {
+        // Reset overrides for selected ellipse
+        delete ellipseOverrides[selectedEllipseKey];
+        drawInputCanvas();
+        return;
+      }
       if (e.key === '+' || e.key === '=') {
         if (lastFocusPoint) zoomToPoint(lastFocusPoint.x, lastFocusPoint.y);
         return;
@@ -762,8 +1023,43 @@
       return best;
     }
 
+    // Ellipse drag state
+    let ellipseDragStart = { x: 0, y: 0 };
+    let ellipseDragEllStart = null;  // snapshot of ellipse at drag start
+
     canvasInput.addEventListener('mousedown', e => {
       const { x, y } = screenToImage(e.clientX, e.clientY);
+
+      // Ellipse editing intercepts when overlay is visible
+      if (showEllipses) {
+        const hit = hitTestEllipses(x, y);
+        if (hit) {
+          if (hit.mode === 'body') {
+            // Select this ellipse
+            selectedEllipseKey = hit.key;
+            ellipseDragMode = null;
+            drawInputCanvas();
+          } else {
+            // Start dragging a handle
+            selectedEllipseKey = hit.key;
+            ellipseDragMode = hit.mode;
+            ellipseDragStart = { x, y };
+            const eff = getEffectiveEllipses();
+            ellipseDragEllStart = eff ? { ...eff[hit.key] } : null;
+            didDrag = false;
+          }
+          e.preventDefault();
+          return;
+        }
+        // Click on empty space deselects
+        if (selectedEllipseKey) {
+          selectedEllipseKey = null;
+          ellipseDragMode = null;
+          drawInputCanvas();
+          e.preventDefault();
+          return;
+        }
+      }
 
       if (activeTool === 'lens') {
         // Try to grab an existing handle
@@ -819,6 +1115,63 @@
     });
 
     window.addEventListener('mousemove', e => {
+      // Ellipse handle dragging
+      if (ellipseDragMode && selectedEllipseKey && ellipseDragEllStart) {
+        const { x, y } = screenToImage(e.clientX, e.clientY);
+        const dx = x - ellipseDragStart.x;
+        const dy = y - ellipseDragStart.y;
+        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) didDrag = true;
+
+        if (!ellipseOverrides[selectedEllipseKey]) {
+          ellipseOverrides[selectedEllipseKey] = {};
+        }
+        const ov = ellipseOverrides[selectedEllipseKey];
+        const ell = ellipseDragEllStart;
+
+        if (ellipseDragMode === 'center') {
+          // Move: direct translation
+          const base = computeStoneEllipses(stoneThickness);
+          if (base && base[selectedEllipseKey]) {
+            ov.dcx = (ell.cx + dx) - base[selectedEllipseKey].cx;
+            ov.dcy = (ell.cy + dy) - base[selectedEllipseKey].cy;
+          }
+        } else {
+          // Axis handle: decompose motion into radial (resize) and tangential (rotate)
+          const rad = ell.angle * Math.PI / 180;
+          const cosA = Math.cos(rad), sinA = Math.sin(rad);
+
+          // Direction from center to handle
+          let hx, hy;
+          if (ellipseDragMode === 'majorA') { hx = cosA; hy = sinA; }
+          else if (ellipseDragMode === 'majorB') { hx = -cosA; hy = -sinA; }
+          else if (ellipseDragMode === 'minorA') { hx = -sinA; hy = cosA; }
+          else /* minorB */ { hx = sinA; hy = -cosA; }
+
+          // Radial component: projection of drag onto handle direction
+          const radialDelta = dx * hx + dy * hy;
+          // Tangential component: perpendicular to handle direction
+          const tangDelta = dx * (-hy) + dy * hx;
+
+          const base = computeStoneEllipses(stoneThickness);
+          if (base && base[selectedEllipseKey]) {
+            const baseEll = base[selectedEllipseKey];
+            if (ellipseDragMode === 'majorA' || ellipseDragMode === 'majorB') {
+              ov.da = Math.max(ell.a + radialDelta, 3) - baseEll.a;
+            } else {
+              ov.db = Math.max(ell.b + radialDelta, 3) - baseEll.b;
+            }
+            // Rotation from tangential movement
+            const armLen = (ellipseDragMode === 'majorA' || ellipseDragMode === 'majorB') ? ell.a : ell.b;
+            if (armLen > 1) {
+              const angleDelta = Math.atan2(tangDelta, armLen) * 180 / Math.PI;
+              ov.dangle = (ell.angle + angleDelta) - baseEll.angle;
+            }
+          }
+        }
+        drawInputCanvas();
+        return;
+      }
+
       if (lensDragging) {
         const { x, y } = screenToImage(e.clientX, e.clientY);
         const dx = x - dragStart.x, dy = y - dragStart.y;
@@ -850,6 +1203,11 @@
     });
 
     window.addEventListener('mouseup', e => {
+      if (ellipseDragMode) {
+        ellipseDragMode = null;
+        ellipseDragEllStart = null;
+        return;
+      }
       if (lensDragging) {
         const i = +lensDragging.split('-')[1];
         lastFocusPoint = { x: lensCorners[i].x, y: lensCorners[i].y };
@@ -1349,6 +1707,27 @@
           Math.round(p.x * 10) / 10,
           Math.round(p.y * 10) / 10,
         ]);
+        // Derive stone ellipses from homography + thickness, with manual overrides
+        const ellipses = getEffectiveEllipses();
+        if (ellipses && Object.keys(ellipses).length > 0) {
+          fixture.stoneThickness = Math.round(stoneThickness * 100) / 100;
+          // Round values for JSON
+          const rounded = {};
+          for (const [key, ell] of Object.entries(ellipses)) {
+            rounded[key] = {
+              cx: Math.round(ell.cx * 10) / 10,
+              cy: Math.round(ell.cy * 10) / 10,
+              a: Math.round(ell.a * 10) / 10,
+              b: Math.round(ell.b * 10) / 10,
+              angle: Math.round(ell.angle * 10) / 10,
+            };
+          }
+          fixture.stoneEllipses = rounded;
+          // Store overrides separately so they can be restored
+          if (Object.keys(ellipseOverrides).length > 0) {
+            fixture.ellipseOverrides = ellipseOverrides;
+          }
+        }
       }
       return fixture;
     }
@@ -1402,6 +1781,17 @@
         lensCorners = fixture.boardCorners.map(p => ({ x: p[0], y: p[1] }));
         setActiveTool('lens');
       }
+
+      // Restore stone thickness if present
+      if (fixture.stoneThickness != null) {
+        stoneThickness = fixture.stoneThickness;
+        el('stone-thickness').value = stoneThickness;
+        el('stone-thickness-val').textContent = stoneThickness.toFixed(2);
+      }
+
+      // Restore ellipse overrides if present
+      ellipseOverrides = fixture.ellipseOverrides || {};
+      selectedEllipseKey = null;
 
       drawBoard();
       drawInputCanvas();
