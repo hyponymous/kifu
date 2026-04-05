@@ -1157,6 +1157,7 @@
       const candidates = [];
       const contourDebug = [];     // debug info for accepted candidates
       const rejectedDebug = [];    // debug info for rejected contours
+      const pass2Arcs = [];        // individual arcs for constrained fitting in pass 2
 
       for (let i = 0; i < contours.size(); i++) {
         const cnt = contours.get(i);
@@ -1253,11 +1254,22 @@
         }
         const fitRms = Math.sqrt(sumSqDist / fitPts.length);
 
+        // Helper: save individual arcs for pass-2 constrained fitting
+        const saveArcsForPass2 = () => {
+          for (const arc of arcs) {
+            if (arc.length < minArcLen) continue;
+            let sx = 0, sy = 0;
+            for (const p of arc) { sx += p.x; sy += p.y; }
+            pass2Arcs.push({ pts: arc, centroid: { x: sx / arc.length, y: sy / arc.length } });
+          }
+        };
+
         if (eccentricity < 0.4) {
           rejectedDebug.push({
             allPts, smoothMask, arcLabels, arcs,
             rejectReason: `eccentricity ${eccentricity.toFixed(2)} < 0.4`, ellipse: { center: rr.center, axes: { a, b }, angle, meanderRatio, fitRms },
           });
+          saveArcsForPass2();
           continue;
         }
 
@@ -1267,6 +1279,7 @@
             rejectReason: `radius ${avgR.toFixed(1)} outside [${(minR*0.4).toFixed(1)}, ${(maxR*1.5).toFixed(1)}]`,
             ellipse: { center: rr.center, axes: { a, b }, angle, meanderRatio, fitRms },
           });
+          saveArcsForPass2();
           continue;
         }
 
@@ -1276,6 +1289,7 @@
             rejectReason: `fitRms ${fitRms.toFixed(2)} > ${fitRmsMax}`,
             ellipse: { center: rr.center, axes: { a, b }, angle, meanderRatio, fitRms },
           });
+          saveArcsForPass2();
           continue;
         }
 
@@ -1286,6 +1300,7 @@
             rejectReason: `fit pts ${(fitPtsPct * 100).toFixed(0)}% < 15%`,
             ellipse: { center: rr.center, axes: { a, b }, angle, meanderRatio, fitRms },
           });
+          saveArcsForPass2();
           continue;
         }
 
@@ -1303,6 +1318,30 @@
           allPts, smoothMask, arcLabels, arcs,
           rejectReason: null, ellipse: candidate,
         });
+
+        // For accepted contours, save arcs far from the fitted ellipse (likely from adjacent stones)
+        const angRad2 = angle * Math.PI / 180;
+        const cosA2 = Math.cos(angRad2), sinA2 = Math.sin(angRad2);
+        for (const arc of arcs) {
+          if (arc.length < minArcLen) continue;
+          // Check if most arc points are far from the fitted ellipse
+          let farCount = 0;
+          for (const p of arc) {
+            const dx = p.x - rr.center.x, dy = p.y - rr.center.y;
+            const lx = dx * cosA2 + dy * sinA2;
+            const ly = -dx * sinA2 + dy * cosA2;
+            const rActual = Math.sqrt(lx * lx + ly * ly);
+            const theta = Math.atan2(ly, lx);
+            const ct = Math.cos(theta), st = Math.sin(theta);
+            const rEllipse = (a * b) / Math.sqrt((b * ct) ** 2 + (a * st) ** 2);
+            if (Math.abs(rActual - rEllipse) > fitRmsMax * 3) farCount++;
+          }
+          if (farCount > arc.length * 0.5) {
+            let sx = 0, sy = 0;
+            for (const p of arc) { sx += p.x; sy += p.y; }
+            pass2Arcs.push({ pts: arc, centroid: { x: sx / arc.length, y: sy / arc.length } });
+          }
+        }
       }
       contours.delete();
 
@@ -1334,6 +1373,9 @@
       const preOutlier = merged.length;
       /** @type {number[] | null} */ let sizeCoeffsA = null;
       /** @type {number[] | null} */ let sizeCoeffsB = null;
+      /** @type {number[] | null} */ let angleCoeffsSin = null;
+      /** @type {number[] | null} */ let angleCoeffsCos = null;
+      let eccLo = -Infinity, eccHi = Infinity;
       if (merged.length >= 6) {
         // --- Size: RANSAC linear model on major axis ---
         // Exclude bottom 25th percentile by `a` from RANSAC sampling to avoid
@@ -1357,14 +1399,14 @@
         ));
         // Orientation: fit sin(2θ) and cos(2θ) as linear spatial models to handle wrapping.
         // Use absolute tolerance since sin/cos range from -1 to 1.
-        const { coeffs: angleCoeffsSin } = ransacLinearModel(
+        ({ coeffs: angleCoeffsSin } = ransacLinearModel(
           merged.map(e => [e.center.x, e.center.y, Math.sin(2 * e.angle * Math.PI / 180)]),
           0.5, 100, true,
-        );
-        const { coeffs: angleCoeffsCos } = ransacLinearModel(
+        ));
+        ({ coeffs: angleCoeffsCos } = ransacLinearModel(
           merged.map(e => [e.center.x, e.center.y, Math.cos(2 * e.angle * Math.PI / 180)]),
           0.5, 100, true,
-        );
+        ));
 
         // --- Eccentricity: global median ± k*MAD ---
         const eccs = merged.map(e => e.eccentricity);
@@ -1373,8 +1415,8 @@
         const eccMADs = eccs.map(v => Math.abs(v - eccMedian));
         eccMADs.sort((a, b) => a - b);
         const eccMAD = eccMADs[Math.floor(eccMADs.length / 2)];
-        const eccLo = eccMedian - 4 * Math.max(eccMAD, 0.05);
-        const eccHi = eccMedian + 4 * Math.max(eccMAD, 0.05);
+        eccLo = eccMedian - 4 * Math.max(eccMAD, 0.05);
+        eccHi = eccMedian + 4 * Math.max(eccMAD, 0.05);
 
         // --- Orientation: circular median, gated by eccentricity ---
         let angleTol = Infinity;  // disabled by default
@@ -1453,8 +1495,210 @@
         if (sizeCoeffsB) console.log(`[ellipse] size model: b = ${sizeCoeffsB[0].toFixed(2)} + ${sizeCoeffsB[1].toFixed(4)}·x + ${sizeCoeffsB[2].toFixed(4)}·y`);
       }
 
-      console.log(`[ellipse] ${candidates.length} pre-dedup → ${preOutlier} deduped → ${merged.length} after outlier rejection, ${rejectedDebug.length} total rejected`);
+      // ── Pass 2: constrained per-arc fitting using spatial models ──
+      let pass2Attempted = 0, pass2Recovered = 0, pass2Replaced = 0;
+      if (sizeCoeffsA && sizeCoeffsB && pass2Arcs.length > 0) {
+        const predictA = (x, y) => sizeCoeffsA[0] + sizeCoeffsA[1] * x + sizeCoeffsA[2] * y;
+        const predictB = (x, y) => sizeCoeffsB[0] + sizeCoeffsB[1] * x + sizeCoeffsB[2] * y;
+        const predictAngle = (angleCoeffsSin && angleCoeffsCos)
+          ? (x, y) => {
+              const s = angleCoeffsSin[0] + angleCoeffsSin[1] * x + angleCoeffsSin[2] * y;
+              const c = angleCoeffsCos[0] + angleCoeffsCos[1] * x + angleCoeffsCos[2] * y;
+              return Math.atan2(s, c) * 180 / Math.PI / 2;
+            }
+          : null;
+        const mergeThresh2 = minR * 0.5;
+
+        for (const arc of pass2Arcs) {
+          const predA = predictA(arc.centroid.x, arc.centroid.y);
+          const predB = predictB(arc.centroid.x, arc.centroid.y);
+          if (predA <= 0 || predB <= 0) continue;
+          const predAng = predictAngle ? predictAngle(arc.centroid.x, arc.centroid.y) : 0;
+
+          pass2Attempted++;
+          if (!arcCurvaturePlausible(arc.pts, predA, predB)) continue;
+          const fit = constrainedEllipseFit(arc.pts, predA, predB, predAng);
+          if (!fit || fit.fitRms > fitRmsMax) continue;
+
+          // Check eccentricity of the predicted ellipse against the band
+          const predEcc = predA > 0 ? predB / predA : 0;
+          if (predEcc < eccLo || predEcc > eccHi) continue;
+
+          // Dedup: check overlap with existing merged detections
+          let dupIdx = -1;
+          for (let mi = 0; mi < merged.length; mi++) {
+            const dx = fit.center.x - merged[mi].center.x;
+            const dy = fit.center.y - merged[mi].center.y;
+            if (Math.sqrt(dx * dx + dy * dy) < mergeThresh2) { dupIdx = mi; break; }
+          }
+
+          const newCand = {
+            center: fit.center,
+            axes: { a: predA, b: predB },
+            angle: predAng,
+            area: Math.PI * predA * predB,
+            eccentricity: predEcc,
+            meanderRatio: 0,  // not meaningful for constrained fit
+            fitRms: fit.fitRms,
+            pass2: true,
+          };
+          const newDebug = {
+            allPts: arc.pts, smoothMask: new Uint8Array(arc.pts.length).fill(1),
+            arcLabels: new Int8Array(arc.pts.length).fill(0), arcs: [arc.pts],
+            rejectReason: null, ellipse: newCand,
+          };
+
+          if (dupIdx >= 0) {
+            // Replace if pass-2 fit is better
+            if (fit.fitRms < merged[dupIdx].fitRms) {
+              merged[dupIdx] = newCand;
+              mergedDebug[dupIdx] = newDebug;
+              pass2Replaced++;
+            }
+          } else {
+            merged.push(newCand);
+            mergedDebug.push(newDebug);
+            pass2Recovered++;
+          }
+        }
+        console.log(`[ellipse] pass-2: ${pass2Attempted} arcs attempted, ${pass2Recovered} new + ${pass2Replaced} replaced (from ${pass2Arcs.length} candidate arcs)`);
+      }
+
+      console.log(`[ellipse] ${candidates.length} pre-dedup → ${preOutlier} deduped → ${merged.length} final (${pass2Recovered} pass-2), ${rejectedDebug.length} total rejected`);
       return { ellipses: merged, contourDebug: mergedDebug, rejectedDebug };
+    }
+
+    /**
+     * Check whether an arc's curvature is consistent with an ellipse of semi-axes (a, b).
+     * Curvature is the turning angle over a ±w point window. For an ellipse, the radius
+     * of curvature ranges from b²/a (tight, at major vertex) to a²/b (gentle, at minor
+     * vertex), so the turning angle per 2w pixels ranges from 2w·b/(a²) to 2w·a/(b²).
+     * Returns true if the arc looks plausible.
+     */
+    function arcCurvaturePlausible(arcPts, predA, predB) {
+      const n = arcPts.length;
+      const w = 5;
+      if (n < 2 * w + 1) return true;  // too short to check, let fitRms filter it
+
+      // Expected turning-angle range for this ellipse
+      const kMin = 2 * w * predB / (predA * predA);  // gentlest (minor vertex)
+      const kMax = 2 * w * predA / (predB * predB);  // tightest (major vertex)
+      // Allow generous tolerance (2× range) since perspective distorts curvature
+      const lo = kMin * 0.3;
+      const hi = kMax * 2.0;
+
+      // Compute per-point curvature (turning angle)
+      const curvs = [];
+      for (let i = w; i < n - w; i++) {
+        const prev = arcPts[i - w], curr = arcPts[i], next = arcPts[i + w];
+        const v1x = curr.x - prev.x, v1y = curr.y - prev.y;
+        const v2x = next.x - curr.x, v2y = next.y - curr.y;
+        const cross = v1x * v2y - v1y * v2x;
+        const dot = v1x * v2x + v1y * v2y;
+        curvs.push(Math.atan2(cross, dot));
+      }
+      if (curvs.length < 3) return true;
+
+      // Check 1: median curvature should be positive (inward-bending) and in range
+      const sorted = curvs.slice().sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)];
+      if (median < lo || median > hi) return false;
+
+      // Check 2: curvature should be mostly in range (allow 25% outliers for noise)
+      let inRange = 0;
+      for (const k of curvs) {
+        if (k >= lo * 0.5 && k <= hi * 1.5) inRange++;
+      }
+      if (inRange < curvs.length * 0.75) return false;
+
+      return true;
+    }
+
+    /**
+     * Constrained ellipse fit: given predicted (a, b, angle), solve for center (cx, cy)
+     * using Gauss-Newton on the algebraic residual sqrt(lx²/a² + ly²/b²) - 1.
+     * Returns { center: {x, y}, fitRms } or null if degenerate/poor fit.
+     */
+    function constrainedEllipseFit(arcPts, predA, predB, predAngle) {
+      if (arcPts.length < 5) return null;
+      const angRad = predAngle * Math.PI / 180;
+      const cosA = Math.cos(angRad), sinA = Math.sin(angRad);
+      const a2 = predA * predA, b2 = predB * predB;
+
+      // Initial guess: arc centroid shifted inward along the arc normal
+      let sumX = 0, sumY = 0;
+      for (const p of arcPts) { sumX += p.x; sumY += p.y; }
+      // Arc chord direction → normal points inward (toward center)
+      const p0 = arcPts[0], pN = arcPts[arcPts.length - 1];
+      const chordX = pN.x - p0.x, chordY = pN.y - p0.y;
+      const chordLen = Math.sqrt(chordX * chordX + chordY * chordY) || 1;
+      // Two candidate normals; pick the one pointing from arc centroid toward chord midpoint
+      // (which is toward the ellipse center, since the arc bulges away from center)
+      let nx = -chordY / chordLen, ny = chordX / chordLen;
+      const midX = (p0.x + pN.x) / 2, midY = (p0.y + pN.y) / 2;
+      const centX = sumX / arcPts.length, centY = sumY / arcPts.length;
+      const toMidX = midX - centX, toMidY = midY - centY;
+      if (nx * toMidX + ny * toMidY < 0) { nx = -nx; ny = -ny; }
+      // Shift by average radius from the centroid
+      const avgR = (predA + predB) / 2;
+      let cx = centX + nx * avgR, cy = centY + ny * avgR;
+
+      // Gauss-Newton: minimize sum of (sqrt(lx²/a² + ly²/b²) - 1)²
+      for (let iter = 0; iter < 5; iter++) {
+        let JtJ00 = 0, JtJ01 = 0, JtJ11 = 0, Jtr0 = 0, Jtr1 = 0;
+        for (const p of arcPts) {
+          const dx = p.x - cx, dy = p.y - cy;
+          const lx = dx * cosA + dy * sinA;
+          const ly = -dx * sinA + dy * cosA;
+          const dist = Math.sqrt(lx * lx / a2 + ly * ly / b2);
+          if (dist < 1e-10) continue;
+          const r = dist - 1;
+          // ∂dist/∂cx = -(lx/a² · cosA - ly/b² · sinA) / dist
+          // ∂dist/∂cy = -(lx/a² · sinA + ly/b² · cosA) / dist
+          const j0 = -(lx / a2 * cosA - ly / b2 * sinA) / dist;
+          const j1 = -(lx / a2 * sinA + ly / b2 * cosA) / dist;
+          JtJ00 += j0 * j0; JtJ01 += j0 * j1; JtJ11 += j1 * j1;
+          Jtr0 += j0 * r; Jtr1 += j1 * r;
+        }
+        const det = JtJ00 * JtJ11 - JtJ01 * JtJ01;
+        if (Math.abs(det) < 1e-15) break;
+        const dcx = (JtJ11 * Jtr0 - JtJ01 * Jtr1) / det;
+        const dcy = (JtJ00 * Jtr1 - JtJ01 * Jtr0) / det;
+        cx -= dcx; cy -= dcy;
+        if (dcx * dcx + dcy * dcy < 0.01) break;  // converged
+      }
+
+      // Compute fit RMS (geometric: point-to-ellipse radial distance)
+      let sumSqDist = 0;
+      const thetas = [];
+      for (const p of arcPts) {
+        const dx = p.x - cx, dy = p.y - cy;
+        const lx = dx * cosA + dy * sinA;
+        const ly = -dx * sinA + dy * cosA;
+        const rActual = Math.sqrt(lx * lx + ly * ly);
+        const theta = Math.atan2(ly, lx);
+        thetas.push(theta);
+        const ct = Math.cos(theta), st = Math.sin(theta);
+        const rEllipse = (predA * predB) / Math.sqrt((predB * ct) ** 2 + (predA * st) ** 2);
+        const diff = rActual - rEllipse;
+        sumSqDist += diff * diff;
+      }
+      const fitRms = Math.sqrt(sumSqDist / arcPts.length);
+
+      // Angular span: sort thetas, find the largest gap, span = 360° - largest gap
+      thetas.sort((a, b) => a - b);
+      let maxGap = 0;
+      for (let i = 1; i < thetas.length; i++) {
+        const gap = thetas[i] - thetas[i - 1];
+        if (gap > maxGap) maxGap = gap;
+      }
+      // Wrap-around gap
+      const wrapGap = (2 * Math.PI) - (thetas[thetas.length - 1] - thetas[0]);
+      if (wrapGap > maxGap) maxGap = wrapGap;
+      const angSpan = (2 * Math.PI - maxGap) * 180 / Math.PI;
+      if (angSpan < 30) return null;
+
+      return { center: { x: cx, y: cy }, fitRms, angSpan };
     }
 
     /**
@@ -2433,7 +2677,7 @@
         hoverTargets.push({
           cx: ell.center.x, cy: ell.center.y,
           matchR: ell.axes.a + ell.axes.b,
-          dbg: contourDebug[i], accepted: true, label: `ellipse #${i}`,
+          dbg: contourDebug[i], accepted: true, label: ell.pass2 ? `pass2 #${i}` : `ellipse #${i}`,
         });
       }
       for (let ri = 0; ri < rejectedDebug.length; ri++) {
