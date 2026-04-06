@@ -562,6 +562,7 @@
     async function tryLoadFixture() {
       window._fixtureIntersections = null;
       window._fixtureBoardSize = null;
+      window._fixtureEllipses = null;
       if (!currentFilename) return;
       const base = currentFilename.replace(/\.[^.]+$/, '');
       const t = Date.now();
@@ -577,6 +578,10 @@
           if (!data || !data.intersections) continue;
           window._fixtureIntersections = data.intersections;
           window._fixtureBoardSize = data.boardRows || 19;
+          if (data.stoneEllipses) {
+            window._fixtureEllipses = data.stoneEllipses;
+            console.log(`[fixture] loaded ${Object.keys(data.stoneEllipses).length} ground-truth ellipses`);
+          }
           console.log(`[fixture] loaded ${data.intersections.length} intersections from ${base}.fixture.json`);
           return;
         } catch { /* try next */ }
@@ -1587,6 +1592,81 @@
 
       console.log(`[ellipse] ${candidates.length} pre-dedup → ${preOutlier} deduped → ${merged.length} final (${pass2Recovered} pass-2), ${rejectedDebug.length} total rejected`);
       return { ellipses: merged, contourDebug: mergedDebug, rejectedDebug };
+    }
+
+    /**
+     * Compare detected ellipses against fixture ground-truth ellipses.
+     * Matching: a detected ellipse matches a GT ellipse if their centers are
+     * within matchR pixels (half the average semi-major axis).
+     * Logs: matched (with position/size error), missed GT, false positive detections.
+     */
+    function scoreEllipsesVsGroundTruth(detected, gtEllipses) {
+      const gtKeys = Object.keys(gtEllipses);
+      const gtList = gtKeys.map(k => ({ key: k, ...gtEllipses[k] }));
+
+      // Average semi-major for match radius
+      const avgA = gtList.reduce((s, e) => s + e.a, 0) / gtList.length;
+      const matchR = avgA * 0.7;
+
+      // Greedy closest-pair matching
+      const gtMatched = new Set();
+      const detMatched = new Set();
+      const matches = [];
+
+      // Sort by distance to get best matches first
+      const pairs = [];
+      for (let di = 0; di < detected.length; di++) {
+        const det = detected[di];
+        for (let gi = 0; gi < gtList.length; gi++) {
+          const gt = gtList[gi];
+          const dist = Math.hypot(det.center.x - gt.cx, det.center.y - gt.cy);
+          if (dist < matchR) pairs.push({ di, gi, dist });
+        }
+      }
+      pairs.sort((a, b) => a.dist - b.dist);
+
+      for (const { di, gi, dist } of pairs) {
+        if (detMatched.has(di) || gtMatched.has(gi)) continue;
+        detMatched.add(di);
+        gtMatched.add(gi);
+        const det = detected[di];
+        const gt = gtList[gi];
+        matches.push({
+          key: gt.key,
+          posDist: dist,
+          aErr: det.axes.a - gt.a,
+          bErr: det.axes.b - gt.b,
+          angErr: (() => {
+            let d = Math.abs(det.angle - gt.angle) % 180;
+            return d > 90 ? 180 - d : d;
+          })(),
+        });
+      }
+
+      const missed = gtList.filter((_, i) => !gtMatched.has(i));
+      const falsePos = detected.filter((_, i) => !detMatched.has(i));
+
+      // Summary
+      console.log(`[ellipse-eval] ${matches.length}/${gtList.length} matched, ${missed.length} missed, ${falsePos.length} false positives (matchR=${matchR.toFixed(1)})`);
+
+      // Match details
+      if (matches.length > 0) {
+        const avgPosDist = matches.reduce((s, m) => s + m.posDist, 0) / matches.length;
+        const avgAErr = matches.reduce((s, m) => s + Math.abs(m.aErr), 0) / matches.length;
+        const avgBErr = matches.reduce((s, m) => s + Math.abs(m.bErr), 0) / matches.length;
+        const avgAngErr = matches.reduce((s, m) => s + m.angErr, 0) / matches.length;
+        console.log(`[ellipse-eval] match stats: posDist=${avgPosDist.toFixed(1)} avgAbsAErr=${avgAErr.toFixed(1)} avgAbsBErr=${avgBErr.toFixed(1)} avgAngErr=${avgAngErr.toFixed(1)}°`);
+      }
+
+      // Missed
+      if (missed.length > 0) {
+        console.log(`[ellipse-eval] missed: ${missed.map(m => `${m.key}@(${m.cx.toFixed(0)},${m.cy.toFixed(0)})`).join(', ')}`);
+      }
+
+      // False positives
+      if (falsePos.length > 0) {
+        console.log(`[ellipse-eval] false pos: ${falsePos.map(e => `(${e.center.x.toFixed(0)},${e.center.y.toFixed(0)}) a=${e.axes.a.toFixed(1)}`).join(', ')}`);
+      }
     }
 
     /**
@@ -2924,6 +3004,11 @@
         ellipseResult = findEllipsesInEdges(ellipseEdges, W, H, roughMinR, roughMaxR, fitRmsMax, minArcLen);
       }
       let ellipses = ellipseResult.ellipses;
+
+      // Compare detected ellipses against fixture ground truth
+      if (window._fixtureEllipses && ellipses.length > 0) {
+        scoreEllipsesVsGroundTruth(ellipses, window._fixtureEllipses);
+      }
 
       // Draw raw quads + ellipses on separate canvas (with hover for contours)
       drawRawFeatures(grayMat, raw, ellipseResult.ellipses, ellipseResult.contourDebug, ellipseResult.rejectedDebug);
